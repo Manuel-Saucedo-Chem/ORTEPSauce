@@ -2,8 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it using the metadata below."
 type: software
 title: "ORTEPSauce"
-version: "1.0.0"
-date-released: "2026-11-12"
+version: "1.0.1"
+date-released: "2026-11-25"
 abstract: >-
   An ORTEP-style crystal structure viewer that reads .cif, .ins and .res files and exports high-resolution images and animated GIFs, with POV-Ray-style rendering options.
 authors:
