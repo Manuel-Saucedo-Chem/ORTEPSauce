@@ -1,12 +1,17 @@
-# ORTEPSauce V1.0
+# ORTEPSauce 1.0.1
 
 ORTEP-style viewer for small-molecule crystal structures from **.cif**, **.ins** and **.res** files,
 with POV-Ray-style shaded rendering, high-resolution image export, POV-Ray scene export, rotating
 GIFs, SI figure captions and coordination-geometry indices (τ₄, τ₄′, τ₅).
 (Formerly "ORTEP Viewer" 0.1-1.9.)
 
+## How to cite
+Saucedo Cañas, M. A.; Fortier, S. ORTEPSauce [Computer software]; Zenodo, 2026.
+DOI: [10.5281/zenodo.24170231](https://doi.org/10.5281/zenodo.24170231)
+(also under the **❝ Citation** button in the program)
+
 ## Run (Windows cmd)
-    cd /d C:\Users\manue\Downloads\ORTEPSauce_V1.0
+    cd /d C:\Users\manue\Downloads\ORTEPSauce_V1.0.1
     py -m pip install -r ortepsauce\requirements.txt
     py -m ortepsauce                       :: GUI
     py -m ortepsauce structure.cif         :: GUI with a file
@@ -14,13 +19,58 @@ GIFs, SI figure captions and coordination-geometry indices (τ₄, τ₄′, τ�
     py -m ortepsauce x.cif --export x.gif                        :: 1600 x 1200, 200 frames
     py -m ortepsauce x.cif --export x.pov             :: POV-Ray scene
 
+## Run on Linux / macOS
+ORTEPSauce is plain Python, so the same code runs on Linux and macOS (the .exe is only for Windows).
+Python 3.9+ with Tk is needed (Ubuntu/Debian: `sudo apt install python3-tk`; macOS: the python.org
+installer includes Tk).
+
+    cd ~/Downloads/ORTEPSauce_V1.0.1
+    python3 -m venv .venv && source .venv/bin/activate      # optional
+    python3 -m pip install -r ortepsauce/requirements.txt
+    python3 -m ortepsauce                                    # GUI
+    python3 -m ortepsauce x.cif --export x.svg --style "ORTEP-3 classic"
+
+If OpenGL is not available the software renderer is used automatically
+(`ORTEPSAUCE_NO_GL=1` forces it).
+
 ## Make a stand-alone .exe (Windows)
 In the extracted folder (next to the `ortepsauce` folder) double-click **build_exe.bat**, or in cmd:
 
-    cd /d C:\Users\manue\Downloads\ORTEPSauce_V1.0
+    cd /d C:\Users\manue\Downloads\ORTEPSauce_V1.0.1
     build_exe.bat
 
 Result: `dist\ORTEPSauce\ORTEPSauce.exe`. Keep the whole `dist\ORTEPSauce` folder together.
+
+
+## Publishing a new version (so that everyone gets it automatically)
+1. Raise `__version__` in `ortepsauce/__init__.py` (1.0.1 → 1.0.2 …).
+2. Double-click **make_release.bat** (builds the .exe, then makes `ORTEPSauce_V<ver>_Windows.zip`,
+   `ORTEPSauce_V<ver>.zip` and `ortepsauce_version.json`).
+3. GitHub → Releases → *Draft a new release*, tag `v<ver>` (e.g. `v1.0.2`), attach both zips, publish
+   (Zenodo archives it as before). Optionally upload `ortepsauce_version.json` to the web page repo.
+Copies of ORTEPSauce 1.0.1 or newer then offer *Install update*. (v1.0.0 has to be replaced by hand
+once.)
+## First start, tutorial, updates
+* The **📖 Tutorial** (bottom right) opens by itself the first time: labels, selecting, colors,
+  saving your own defaults, the SI caption, styles and export.
+* **⚙ Settings & updates** (bottom right):
+  * *Check now / Install update* – looks at the latest GitHub release of Manuel-Saucedo-Chem/ORTEPSauce
+    (or ortepsauce_version.json on the web page), downloads it, checks its SHA-256 and installs it.
+    The .exe closes, is replaced and starts again (_internal is replaced, other files next to the .exe
+    are kept); the Python version replaces the `ortepsauce` folder and keeps the old one as
+    `ortepsauce_backup_<version>`. An automatic check runs at most once a day (can be switched off).
+  * **Your defaults are never touched by an update**: they live in ~/.ortepsauce.json in your user
+    folder, not in the program folder.
+  * *Lab settings file* – set up every tab, **Export lab settings file…** and share it (e-mail, Teams,
+    a shared or cloud folder). Others use **Import lab settings file…** once: the chosen tabs are
+    applied and saved as their defaults, and the file is *followed* – when its owner changes it,
+    ORTEPSauce offers the new version at the next start. A file named `ortepsauce_lab_settings.json`
+    placed next to ORTEPSauce.exe (or the `ortepsauce` folder) is offered automatically at the first start.
+
+## Labels
+Labels start **off**. Click an atom (Shift + drag for a box, double click for the whole molecule)
+and press **L** to label it; L again on labelled atoms removes them; L with nothing selected turns
+all labels on / off. **Ctrl + drag** a label to move it.
 
 ## Undo, defaults
 * **Ctrl+Z / Ctrl+Y** (or Ctrl+Shift+Z) undo / redo any change: settings on every tab, colors, styles,
@@ -42,12 +92,16 @@ Result: `dist\ORTEPSauce\ORTEPSauce.exe`. Keep the whole `dist\ORTEPSauce` folde
   equators, cut-out faces or the selected atoms, from the full POV-Ray colors.inc list or a custom
   color; bond coloring; background.
 * **Styles** – ORTEP ellipsoids, Van der Waals, RMSD surface, Ball and Stick, Rods, MSD surface,
-  Line drawing (vector); probability; *Modify*: Ellipse style (PlainEllipse / BoundaryEllipse /
+  Line drawing (vector), **ORTEP-3 classic** (vector: white ellipsoids with element-colored outlines,
+  principal ellipses, octant shaded with parallel lines, riding H as short sticks, thin black
+  bonds, plain Arial labels); probability; *Modify*: Ellipse style (PlainEllipse / BoundaryEllipse /
   CutoutEllipse), Finish and Texture per target; bond / H / band / ball / rod sizes.
-* **Export** – PNG/TIFF/JPEG/SVG/PDF at any size and dpi (antialiased, optional transparency);
+* **Export** – PNG/TIFF/JPEG/SVG/PDF/EPS at any size and dpi (antialiased, optional transparency);
   POV-Ray .pov (optionally rendered directly if POV-Ray is installed); rotating GIF.
 
 ## Mouse / keys
+double-click an atom: select its whole molecule · right-click with atoms selected: edit only the bonds
+among them, select whole molecules, show only the selected molecules / atoms, hide, invert ·
 left-drag rotate · middle- or Alt-drag spin in plane · shift-drag box selection · right-click: hide a molecule / solvent, rotate around an atom · right-drag pan · wheel or +/- zoom ·
 arrow keys rotate · click 1–4 atoms for info / distance / angle / torsion (also selects atoms for
 per-atom color, style and label changes) · Esc clears · Ctrl+O open · Ctrl+S save image.
@@ -77,8 +131,88 @@ per-atom color, style and label changes) · Esc clears · Ctrl+O open · Ctrl+S 
 | canvas_view.py | draws a frame + labels into matplotlib (GUI, export, GIF) |
 | export.py / pov_export.py | image, GIF and POV-Ray export |
 | gui.py | customtkinter app |
+| packing.py | growing, completing, short contacts |
+| buried_volume.py | %V_bur |
+| citations.py | literature references used in captions |
+| appsettings.py / updates.py | settings window, lab settings files, updates |
+
+## SI tab: geometry index, buried volume, references
+* **τ₄ / τ₄′ / τ₅** of the metal centre (automatic, or choose the metal and ligands).
+* **%V_bur** (percent buried volume, grid method as in SambVca): sphere around the metal (radius 3.5 Å),
+  Bondi radii × 1.17, mesh 0.10 Å, H atoms left out by default – all adjustable. Whole complex, or one
+  ligand (double click it, *Ligand = selection*); for a ligand also the four quadrants. Checked against
+  the exact volume of a single sphere (within 0.01 %) and against the morfeus library on two structures
+  (within 0.5 %); compare with SambVca for your own conventions before publishing.
+* The caption includes τ and %V_bur by default (values only; the %V_bur settings are shown in the SI tab).
+* **References** (off by default): switching them on adds numbered references [1], [2] … with the full
+  ACS-style list below the caption. The texts are in `ortepsauce/citations.py` (one place to correct).
+
+## Packing, polymers, contacts (Mercury-style)
+Structure tab → *Packing, molecules & contacts*:
+* **Range** a / b / c from–to + **Pack this range** (e.g. a 0–2, b 0–2, c 0–1). *Whole molecules*
+  keeps each molecule whose centre is inside the range; *Atoms in range* packs every atom inside it
+  (polymers / networks; chosen automatically when molecules cannot be completed). Capped at 30 000 atoms.
+* **Molecules…** – list of all molecules (formula, atoms, solvent, shown / hidden): select, show only,
+  hide, show, short contacts.
+* **Grow bonds +1** – atoms bonded to the selection across symmetry (polymer expansion, one step per
+  click; the new atoms become the selection). **Complete molecule** – whole molecules.
+* **Short contacts** – neighbouring molecules closer than the sum of the van der Waals radii + the
+  typed value, drawn as thin dashed lines with the distance (switch the numbers off with
+  *Distances on contact lines*). **Remove grown** – back to normal.
+* **H add** – with hydrogens off, click atoms to show only their H atoms (crosshair cursor, Esc stops).
+* Command line: `--pack-range 0 2 0 2 0 1 --pack-mode "Atoms in range"`.
+
+## Vector export (SVG / PDF / EPS)
+With **Line drawing** or **ORTEP-3 classic** every ellipsoid, bond and label is a vector object; labels
+are real text (editable in Illustrator / Inkscape) when the halo is off (ORTEP-3 classic switches it
+off). The shaded styles are embedded as an image inside SVG / PDF / EPS, with vector labels.
+
+## Disorder
+Structure → Exclude atoms → **By name…** (and Wire → By name…): type how the two disorder parts are
+labelled – C21 / C21* (major empty, minor `*`), C55A / C55B (major `A`, minor `B`), C1 / C1' … – and
+press **+ major part** or **+ minor part**. ORTEPSauce guesses the endings from the file; with both
+empty the PART numbers are used (PART 1 = major). Hydrogen atoms follow the PART of their part.
 
 ## Changelog
+**ORTEPSauce 1.0.1** (first update after the v1.0.0 release; development builds 1.1–1.6)
+* **❝ Citation** button and a tutorial page on how to cite ORTEPSauce.
+* References checked against the publishers' records: %V_bur now cites Poater et al. 2008 (the paper
+  SambVca asks users to cite), SambVca 2009 and 2.1, Bondi; τ₄′ cites the 2015 and 2018 papers.
+* New program icon (window, taskbar, .exe), made by make_icon.py from icon_source.png.
+* Saved SI defaults from older versions that still held the old program values are moved to the new
+  ones (geometry index and %V_bur in the caption, references off); values chosen on purpose are kept.
+* RMSD and MSD surfaces are drawn on the graphics card (smooth rotation; exports unchanged).
+* Line drawing / ORTEP-3 classic: light preview while dragging (outlines and bonds, no labels), the
+  full drawing when the mouse stops; faster vector drawing for large structures.
+* SI caption: geometry index and %V_bur on by default, references off by default; the %V_bur
+  sentence gives just the value.
+* SI tab: percent buried volume %V_bur (whole complex or one ligand, quadrants), optional sentence in
+  the caption.
+* References for τ₄, τ₄′, τ₅ and %V_bur, numbered in the caption and listed below it; Copy all references.
+* Updates are downloaded from GitHub and installed from *Settings & updates* (SHA-256 checked);
+  the user's defaults are kept. make_release.bat makes the release files.
+* Lab settings files: export the settings of every tab, share them, import / follow them.
+* *Packing, molecules & contacts* (with *Pack unit cell*) moved below *Centroids & bonds*.
+* Packing over any range of cells, whole molecules or atoms in range (polymers, networks).
+* Molecules list window; grow bonded atoms step by step (polymers); complete molecules; short
+  contacts with dashed lines and distances; all also in the right-click menu.
+* Bond dialog (Ctrl+B): option to write the distance on a bond, e.g. a dashed Cl···Cg contact.
+* H add button: crosshair mode that shows the H atoms of the clicked / selected atoms.
+* "Labels: click an atom and press L" pop-up when a file is opened.
+* ORTEP-3 classic: solid black bonds (thinner to metals) and denser octant shading, as in ORTEP-3.
+* Update check (button + quiet daily check) and a built-in tutorial that opens on the first start.
+* Labels off when a file is opened; clear "select atoms + L" hint; L adds / removes labels of the
+  selected atoms and reminds you that Ctrl + drag moves labels.
+* New **ORTEP-3 classic** vector style (white ellipsoids, colored outlines, hatched octants, H sticks).
+* Double click selects a whole molecule / fragment.
+* Right-click menu for the selection: edit only the bonds among the selected atoms, select whole
+  molecules, show only the selected molecules / atoms, hide, invert (Mercury-style picking).
+* Exclude / wire by name: type the label endings of the major and minor disorder parts.
+* SI caption: bonds are written metal first (Fe1–N1, Fe1–O1).
+* EPS / PostScript export; text stays editable text in SVG / PDF / EPS.
+* .exe: SVG / PDF / EPS export fixed ("No module named matplotlib.backends.backend_pdf").
+* Linux / macOS instructions.
+
 **ORTEPSauce V1.0** (continues ORTEP Viewer 1.9)
 * Renamed to ORTEPSauce (`py -m ortepsauce`, ORTEPSauce.exe, settings in ~/.ortepsauce.json; the
   POV-Ray path from the old ~/.ortepviewer.json is picked up).

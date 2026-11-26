@@ -1,4 +1,4 @@
-"""Entry point:  python -m ortepsauce [file] [--export out.png|.tif|.svg|.pdf|.gif|.pov ...]"""
+"""Entry point:  python -m ortepsauce [file] [--export out.png|.tif|.svg|.pdf|.eps|.gif|.pov ...]"""
 import argparse
 import sys
 
@@ -9,7 +9,7 @@ def cli():
     p = argparse.ArgumentParser(prog='ortepsauce', description='ORTEPSauce - ORTEP-style crystal structure viewer')
     p.add_argument('file', nargs='?', help='.cif, .ins or .res file')
     p.add_argument('--export', metavar='OUT',
-                   help='render without the GUI; format from extension (png, tif, jpg, svg, pdf, gif, pov)')
+                   help='render without the GUI; format from extension (png, tif, jpg, svg, pdf, eps, ps, gif, pov)')
     p.add_argument('--dpi', type=int, default=600)
     p.add_argument('--size', type=int, nargs=2, default=None, metavar=('W', 'H'),
                    help='size in pixels (default 6400 4800; GIF 1600 1200)')
@@ -20,6 +20,10 @@ def cli():
     p.add_argument('--no-h', action='store_true', help='hide hydrogen atoms')
     p.add_argument('--asym', action='store_true', help='do not complete molecules by symmetry')
     p.add_argument('--pack', action='store_true', help='fill the unit cell with complete molecules')
+    p.add_argument('--pack-range', type=float, nargs=6, default=None, metavar=('A0', 'A1', 'B0', 'B1', 'C0', 'C1'),
+                   help='fractional range to pack, e.g. 0 2 0 1 0 1 (implies --pack)')
+    p.add_argument('--pack-mode', default='Whole molecules', choices=['Whole molecules', 'Atoms in range'],
+                   help='pack whole molecules (default) or atoms inside the range (polymers)')
     p.add_argument('--block', type=int, default=0, help='CIF data block index (default 0)')
     p.add_argument('--frames', type=int, default=200, help='GIF frames (default 200)')
     p.add_argument('--opaque', action='store_true', help='solid background (default: transparent)')
@@ -35,7 +39,9 @@ def cli():
         render_file(a.file, a.export, dpi=a.dpi, size=a.size, prob=a.prob, labels=not a.no_labels,
                     show_h=not a.no_h, style=a.style, preset=a.preset, complete=not a.asym,
                     block=a.block, transparent=not a.opaque, frames=a.frames, shadows=a.shadows,
-                    engine='POV-Ray' if a.povray else 'Built-in', povray_exe=a.povray, antialias=not a.no_aa, pack=a.pack,
+                    engine='POV-Ray' if a.povray else 'Built-in', povray_exe=a.povray, antialias=not a.no_aa, pack=a.pack or a.pack_range is not None,
+                    pack_range=None if a.pack_range is None else tuple(zip(a.pack_range[::2], a.pack_range[1::2])),
+                    pack_mode=a.pack_mode,
                     progress=lambda f, m: print(f'\r{f:5.0%}  {m:<40}', end='', flush=True))
         print()
         print(f'Saved {a.export}')

@@ -15,6 +15,7 @@ from matplotlib.path import Path
 from .edits import BOND_WIDTHS, dash_segments
 from .elements import QPEAK_COLOR
 from .settings import RenderSettings  # noqa: F401  (re-exported)
+from .styles import NONMETALS
 
 
 def _P(verts, closed=False):
@@ -46,6 +47,8 @@ def _darken(rgba, f):
 
 _NONE = (0, 0, 0, 0)
 _BLACK = (0, 0, 0, 1)
+_WHITE = (1, 1, 1, 1)
+CLASSIC = 'ORTEP-3 classic'
 
 
 class OrtepRenderer:
@@ -60,6 +63,14 @@ class OrtepRenderer:
 
     # ------------------------------------------------------------------
     def _atom_colors(self, el, label=''):
+        cache = self.__dict__.setdefault('_ccache', {})
+        hit = cache.get((el, label))
+        if hit is not None:
+            return hit
+        hit = cache[(el, label)] = self._atom_colors_uncached(el, label)
+        return hit
+
+    def _atom_colors_uncached(self, el, label=''):
         m = self.styles.material(self.styles.atom_entry(label, el))
         base = tuple(m['color']) + (1.0,)
         cut = self.styles.material(self.styles.get('Cutout faces'))['color']
@@ -72,12 +83,16 @@ class OrtepRenderer:
         Returns (projected centres, projected radii, visible mask)."""
         s = self.s
         k = probability_scale(s.probability / 100.0)
+        classic = getattr(s, 'atom_style', '') == CLASSIC
+        lite = getattr(self, 'lite', False)        # drag preview: outlines + bonds only
+        lw_out = s.line_width * (1.35 if classic else 1.0)
 
         n = model.n
         is_h = model.is_h() if n else np.zeros(0, bool)
         visible = np.ones(n, bool)
         if not s.show_h:
-            visible &= ~is_h
+            visible &= ~is_h | np.array([f'{model.labels[k]}|{model.symop[k]}' in s.shown_h
+                                           for k in range(n)], bool) if getattr(s, 'shown_h', None) else ~is_h
         if getattr(s, 'excluded', None):
             visible &= np.array([lab not in s.excluded for lab in model.labels], bool)
         if getattr(s, 'hidden_keys', None):
@@ -96,21 +111,36 @@ class OrtepRenderer:
         u_inv = np.zeros((n, 3, 3))
         sphere_r = np.zeros(n)
 
-        tt = np.linspace(0, 2 * np.pi, 61)
+        tt = np.linspace(0, 2 * np.pi, 25 if lite else 61)
         circle = np.stack([np.cos(tt), np.sin(tt)], axis=1)
+        self._ccache = {}
+        # all rotated ADPs, inverses and eigen-decompositions at once (much faster than per atom)
+        U_all = np.einsum('ij,njk,lk->nil', R, model.ucart, R) if n else np.zeros((0, 3, 3))
+        ani = np.asarray(model.aniso, bool) & visible & ~is_h if n else np.zeros(0, bool)
+        Usafe = np.where(ani[:, None, None], U_all, np.eye(3)[None]) if n else U_all
+        Uinv_all = np.linalg.inv(Usafe) if n else Usafe
+        W2, V2 = np.linalg.eigh((k * k) * Usafe[:, :2, :2]) if n else (None, None)
+        L3, V3 = np.linalg.eigh(Usafe) if n else (None, None)
 
         for i in range(n):
             if not visible[i]:
                 continue
             c = X[i]
             face, dark = self._atom_colors(model.elements[i], model.labels[i])
+            edge = _BLACK
+            if classic:   # ORTEP-3 look: white bodies, element-coloured lines
+                edge, face = face, _WHITE
             if wire[i]:
                 radii_screen[i] = getattr(s, 'wire_radius', 0.025)
                 continue
             if model.elements[i] == 'Cg':
                 r = getattr(s, 'centroid_radius', 0.09)
                 sphere_r[i] = radii_screen[i] = r
-                items.append((c[2], 0, _P(c[:2] + r * circle, closed=True), face, _BLACK, s.line_width * 0.6, '-'))
+                items.append((c[2], 0, _P(c[:2] + r * circle, closed=True), face, edge, s.line_width * 0.6, '-'))
+                continue
+            if is_h[i] and classic:   # riding H drawn as short sticks only
+                sphere_r[i] = 0.0
+                radii_screen[i] = 0.08
                 continue
             if is_h[i]:
                 r = s.h_radius
@@ -118,26 +148,25 @@ class OrtepRenderer:
                 radii_screen[i] = r
                 items.append((c[2], 0, _P(c[:2] + r * circle, closed=True), face, _BLACK, s.line_width * 0.7, '-'))
                 continue
-            U = R @ model.ucart[i] @ R.T
+            U = U_all[i]
             u_rot[i] = U
             if not model.aniso[i]:
                 r = k * math.sqrt(max(U[0, 0], 1e-6))
                 sphere_r[i] = r
                 radii_screen[i] = r
-                items.append((c[2], 0, _P(c[:2] + r * circle, closed=True), face, _BLACK, s.line_width, '-'))
+                items.append((c[2], 0, _P(c[:2] + r * circle, closed=True), face, edge, lw_out, '-'))
                 continue
-            u_inv[i] = np.linalg.inv(U)
+            u_inv[i] = Uinv_all[i]
             # projected outline: marginal 2x2 covariance
-            C2 = (k * k) * U[:2, :2]
-            w, v = np.linalg.eigh(C2)
+            w, v = W2[i], V2[i]
             w = np.sqrt(np.clip(w, 1e-8, None))
             outline = c[:2] + (circle * w) @ v.T
             radii_screen[i] = w.max()
-            items.append((c[2], 0, _P(outline, closed=True), face, _BLACK, s.line_width, '-'))
+            items.append((c[2], 0, _P(outline, closed=True), face, edge, lw_out, '-'))
 
-            lam, vec = np.linalg.eigh(U)
+            lam, vec = L3[i], V3[i]
             axes = (k * np.sqrt(np.clip(lam, 1e-8, None)))[None, :] * vec   # columns = semi-axes
-            if s.octant:
+            if s.octant and not lite:
                 sg = np.where(axes[2] >= 0, 1.0, -1.0)
                 ca = axes * sg[None, :]
                 q = np.linspace(0, np.pi / 2, 16)
@@ -146,14 +175,25 @@ class OrtepRenderer:
                     arc = np.outer(np.cos(q), ca[:, a_]) + np.outer(np.sin(q), ca[:, b_])
                     pts.append(arc[:-1])
                 poly = c[:2] + np.concatenate(pts)[:, :2]
-                items.append((c[2], 1, _P(poly, closed=True), dark, _BLACK, s.line_width * 0.6, '-'))
-            if s.principal:
+                if classic:
+                    items.append((c[2], 1, _P(poly, closed=True), _WHITE, edge, s.line_width * 0.8, '-'))
+                    # parallel shading lines on the three cut faces of the octant
+                    for a_, b_ in ((0, 1), (1, 2), (2, 0)):
+                        for tq in (1 / 6, 2 / 6, 3 / 6, 4 / 6, 5 / 6):
+                            sm = math.sqrt(1 - tq * tq)
+                            p0 = c[:2] + (tq * ca[:, a_])[:2]
+                            p1 = c[:2] + (tq * ca[:, a_] + sm * ca[:, b_])[:2]
+                            items.append((c[2], 1.5, _P(np.array([p0, p1])), _NONE, edge,
+                                          s.line_width * 0.5, '-'))
+                else:
+                    items.append((c[2], 1, _P(poly, closed=True), dark, _BLACK, s.line_width * 0.6, '-'))
+            if s.principal and not lite:
                 for a_, b_ in ((0, 1), (1, 2), (2, 0)):
                     ea, eb = axes[:, a_], axes[:, b_]
                     phi = math.atan2(eb[2], ea[2])
                     t = np.linspace(phi - np.pi / 2, phi + np.pi / 2, 31)
                     arc = np.outer(np.cos(t), ea) + np.outer(np.sin(t), eb)
-                    items.append((c[2], 2, _P(c[:2] + arc[:, :2]), _NONE, _BLACK, s.line_width * 0.6, '-'))
+                    items.append((c[2], 2, _P(c[:2] + arc[:, :2]), _NONE, edge, s.line_width * 0.6, '-'))
 
         # ---- bonds
         bond_rgba = [tuple(self.styles.material(self.styles.get(t))['color']) + (1.0,)
@@ -189,13 +229,21 @@ class OrtepRenderer:
             ci = self._atom_colors(model.elements[i], model.labels[i])[0]
             cj = self._atom_colors(model.elements[j], model.labels[j])[0]
             xh = is_h[i] or is_h[j]
+            if classic and xh:   # thin black stick to the riding H
+                items.append((0.5 * (pa[2] + pb[2]), 0, _P(np.array([pa[:2], pb[:2]])), _NONE, _BLACK,
+                              s.line_width, '-'))
+                continue
             if s.bond_coloring != 'Split by atom':
                 ci = cj = bond_rgba[1] if xh else bond_rgba[0]
             br = s.hbond_radius if xh else s.bond_radius
+            if classic:   # solid black bonds as in ORTEP-3; bonds to metals thinner
+                ci = cj = _BLACK
+                metal = (model.elements[i] not in NONMETALS) or (model.elements[j] not in NONMETALS)
+                br *= 0.42 if metal else 0.75
             bst = (getattr(model, 'bond_style', {}) or {}).get((min(i, j), max(i, j)))
             if bst and (bst.get('style', 'Solid') != 'Solid' or bst.get('width', 'Normal') != 'Normal'):
                 br *= BOND_WIDTHS.get(bst.get('width', 'Normal'), 1.0)
-                col = bond_rgba[1] if xh else bond_rgba[0]
+                col = _BLACK if classic else (bond_rgba[1] if xh else bond_rgba[0])
                 for piece in dash_segments(pa, pb, bst.get('style', 'Solid'), br):
                     if piece[0] == 'cyl':
                         self._bond_poly(items, piece[1], piece[2], br, col, zspan)

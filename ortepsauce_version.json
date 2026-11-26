@@ -1,0 +1,9 @@
+{
+  "version": "1.0.1",
+  "url": "https://github.com/Manuel-Saucedo-Chem/ORTEPSauce/releases/tag/v1.0.1",
+  "notes": "ORTEPSauce 1.0.1",
+  "windows_zip": "https://github.com/Manuel-Saucedo-Chem/ORTEPSauce/releases/download/v1.0.1/ORTEPSauce_V1.0.1_Windows.zip",
+  "windows_sha256": "2b46b313f05611a7d83a4566deac33c1190cecc1f842d6fc6ed229269d1f1db2",
+  "source_zip": "https://github.com/Manuel-Saucedo-Chem/ORTEPSauce/releases/download/v1.0.1/ORTEPSauce_V1.0.1.zip",
+  "source_sha256": "5e84bd0fe00b1074fbbe408a0a8709e6b83bb40297784d7e928bc995e141401f"
+}

@@ -171,9 +171,83 @@ void main() {
 }
 """
 
+_MESH_VS = """
+#version 120
+attribute vec3 aPos; attribute vec3 aNrm; attribute float aMat;
+uniform mat3 uR; uniform vec2 uPan; uniform vec2 uHalf; uniform float uDepthScale;
+varying vec3 vN; varying vec3 vLoc; varying float vMat; varying float vZ;
+void main() {
+    vec3 p = uR * aPos;
+    vN = uR * aNrm;
+    vLoc = aPos;
+    vMat = aMat;
+    vZ = p.z;
+    gl_Position = vec4((p.xy - uPan) / uHalf, 0.0, 1.0);
+}
+"""
+
+_MESH_FS = """
+#version 120
+""" + _COMMON_FS + """
+varying vec3 vN; varying vec3 vLoc; varying float vMat; varying float vZ;
+void main() {
+    vec3 n = normalize(vN);
+    if (n.z < 0.0) n = -n;          // silhouette fragments of a closed surface
+    gl_FragDepth = clamp(0.5 - vZ * uDepthScale, 0.0, 1.0);
+    gl_FragColor = vec4(shade(n, vMat, vLoc * 4.0), 1.0);
+}
+"""
+
+
+def icosphere(level=3):
+    """Unit-sphere triangle mesh: (vertices (n, 3), faces (m, 3) uint32)."""
+    t = (1.0 + 5 ** 0.5) / 2
+    v = [[-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
+         [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1]]
+    f = [[0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11], [1, 5, 9], [5, 11, 4], [11, 10, 2],
+         [10, 7, 6], [7, 1, 8], [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9], [4, 9, 5], [2, 4, 11],
+         [6, 2, 10], [8, 6, 7], [9, 8, 1]]
+    v = [np.array(x, float) / np.linalg.norm(x) for x in v]
+    for _ in range(level):
+        mid = {}
+        nf = []
+
+        def m(a, b):
+            key = (min(a, b), max(a, b))
+            if key not in mid:
+                p = v[a] + v[b]
+                v.append(p / np.linalg.norm(p))
+                mid[key] = len(v) - 1
+            return mid[key]
+        for a, b, c in f:
+            ab, bc, ca = m(a, b), m(b, c), m(c, a)
+            nf += [[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]
+        f = nf
+    return np.array(v, np.float64), np.array(f, np.uint32)
+
+
+_ICO = {}
+
+
+def star_surface_mesh(c, U, kind, k, ueq, level=3):
+    """Vertices and smooth normals of an RMSD / MSD surface (r(u) = k*sqrt(uUu) or k*uUu/sqrt(Ueq))."""
+    if level not in _ICO:
+        _ICO[level] = icosphere(level)
+    S, F = _ICO[level]
+    q = np.einsum('ni,ij,nj->n', S, U, S)
+    r = k * np.sqrt(np.maximum(q, 0)) if kind == 'rmsd' else (k / np.sqrt(max(ueq, 1e-12))) * q
+    P = S * np.maximum(r, 1e-4)[:, None]
+    fn = np.cross(P[F[:, 1]] - P[F[:, 0]], P[F[:, 2]] - P[F[:, 0]])
+    N = np.zeros_like(P)
+    for j in range(3):
+        np.add.at(N, F[:, j], fn)
+    N /= np.maximum(np.linalg.norm(N, axis=1, keepdims=True), 1e-12)
+    return P + np.asarray(c, float), N, F
+
+
 _STYLE = {'PlainEllipse': 0.0, 'BoundaryEllipse': 1.0, 'CutoutEllipse': 2.0}
 _QUAD = np.array([[-1, -1], [1, -1], [1, 1], [-1, -1], [1, 1], [-1, 1]], np.float32)
-GL_STYLES = ('ORTEP ellipsoids', 'Van der Waals', 'Ball and Stick', 'Rods')
+GL_STYLES = ('ORTEP ellipsoids', 'Van der Waals', 'Ball and Stick', 'Rods', 'RMSD surface', 'MSD surface')
 
 
 

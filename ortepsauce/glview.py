@@ -25,8 +25,8 @@ from .raster import light_vectors
 from .scene import build_scene
 from .styles import color_rgb, hex_to_rgb
 
-from .gl_shaders import (GL_STYLES, MAXM, _CYL_FS, _CYL_VS, _ELL_FS, _ELL_VS, _QUAD,  # noqa: F401
-                         _STYLE)
+from .gl_shaders import (GL_STYLES, MAXM, _CYL_FS, _CYL_VS, _ELL_FS, _ELL_VS, _MESH_FS, _MESH_VS,  # noqa: F401
+                         _QUAD, _STYLE, star_surface_mesh)
 from .gl_shaders import srgb as _srgb
 
 
@@ -40,6 +40,8 @@ class GLMolView(OpenGLFrame):
         self.prog_e = self.prog_c = None
         self.vbo_e = self.vbo_c = None
         self.n_e = self.n_c = 0
+        self.prog_m = self.vbo_m = self.ibo_m = None
+        self.n_m = 0
         self.scene = None
         self.tex_cache = {}
         self.fbo = None
@@ -62,6 +64,13 @@ class GLMolView(OpenGLFrame):
                 self.prog_c = self._program(_CYL_VS, _CYL_FS)
                 self.vbo_e = GL.glGenBuffers(1)
                 self.vbo_c = GL.glGenBuffers(1)
+            if self.prog_m is None:
+                try:                     # RMSD / MSD surfaces as triangle meshes
+                    self.prog_m = self._program(_MESH_VS, _MESH_FS)
+                    self.vbo_m = GL.glGenBuffers(1)
+                    self.ibo_m = GL.glGenBuffers(1)
+                except Exception:  # noqa: BLE001 - surfaces then use the software view
+                    self.prog_m = None
             self.ready = True
         except Exception as e:  # noqa: BLE001
             self.failed = str(e)
@@ -93,6 +102,24 @@ class GLMolView(OpenGLFrame):
                                       cell=app.struct.cell if app.struct else None)
         ells = [p for p in sc.prims if p['type'] == 'ellipsoid']
         cyls = [p for p in sc.prims if p['type'] == 'cylinder']
+        surfs = [p for p in sc.prims if p['type'] == 'surface']
+        self.n_m = 0
+        if surfs and self.prog_m is not None:
+            level = 4 if len(surfs) <= 150 else 3            # 2562 / 642 vertices per atom
+            verts, idx, off = [], [], 0
+            for p in surfs:
+                P, N, F = star_surface_mesh(p['c'], p['U'], p['kind'], p['k'], p['ueq'], level)
+                verts.append(np.concatenate([P, N, np.full((len(P), 1), p['mat'])], 1))
+                idx.append(F + off)
+                off += len(P)
+            vdata = np.ascontiguousarray(np.concatenate(verts), np.float32)
+            idata = np.ascontiguousarray(np.concatenate(idx).ravel(), np.uint32)
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_m)
+            GL.glBufferData(GL.GL_ARRAY_BUFFER, vdata.nbytes, vdata, GL.GL_STATIC_DRAW)
+            GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, self.ibo_m)
+            GL.glBufferData(GL.GL_ELEMENT_ARRAY_BUFFER, idata.nbytes, idata, GL.GL_STATIC_DRAW)
+            GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, 0)
+            self.n_m = len(idata)
         if ells:
             rows = []
             for p in ells:
@@ -121,6 +148,9 @@ class GLMolView(OpenGLFrame):
             if 0 <= p['oid'] < n:
                 A = p['V'] * p['a'][None, :]
                 self.atom_M[p['oid']] = A @ A.T
+        for p in surfs:
+            if 0 <= p['oid'] < n:
+                self.atom_M[p['oid']] = np.eye(3) * p['rmax'] ** 2
         self.zmax = float(np.abs(model.cart - app.center).max() + 10.0) if n else 10.0
         mats = sc.materials[:MAXM]
         self.mat_arrays = (
@@ -248,6 +278,16 @@ class GLMolView(OpenGLFrame):
             GL.glDrawArrays(GL.GL_TRIANGLES, 0, self.n_e)
             for loc in locs:
                 GL.glDisableVertexAttribArray(loc)
+        if self.n_m:
+            GL.glUseProgram(self.prog_m)
+            self._set_uniforms(self.prog_m, half, pan)
+            GL.glBindBuffer(GL.GL_ARRAY_BUFFER, self.vbo_m)
+            GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, self.ibo_m)
+            locs = self._attribs(self.prog_m, [('aPos', 3), ('aNrm', 3), ('aMat', 1)], 7 * 4)
+            GL.glDrawElements(GL.GL_TRIANGLES, self.n_m, GL.GL_UNSIGNED_INT, None)
+            for loc in locs:
+                GL.glDisableVertexAttribArray(loc)
+            GL.glBindBuffer(GL.GL_ELEMENT_ARRAY_BUFFER, 0)
         if self.n_c:
             GL.glUseProgram(self.prog_c)
             self._set_uniforms(self.prog_c, half, pan)
@@ -403,6 +443,18 @@ class GLMolView(OpenGLFrame):
                     x, y = self._to_px(q[0] + 0.12, q[1] + 0.12, W, H, scale, pan)
                     self._draw_text(m.q_labels[qi], x, y, s.label_size * 0.75, (0.42, 0.30, 0.58),
                                     family=s.label_font)
+        if getattr(s, 'contact_labels', True):
+            fc2 = color_rgb(s.label_color)
+            for (i, j), st in (getattr(m, 'bond_style', None) or {}).items():
+                if not st.get('dist') or max(i, j) >= len(self.anchor_xy):
+                    continue
+                if max(i, j) < len(self.visible) and not (self.visible[i] and self.visible[j]):
+                    continue
+                d = float(np.linalg.norm(m.cart[i] - m.cart[j]))
+                p = 0.5 * (self.anchor_xy[i] + self.anchor_xy[j])
+                x, y = self._to_px(p[0], p[1], W, H, scale, pan)
+                self._draw_text(f'{d:.2f} Å', x, y, s.label_size * 0.8, fc2, False, False, s.label_font,
+                                s.label_halo, hex_to_rgb(s.background))
         if self.scene is not None and self.scene.cell_corners is not None and app.struct is not None:
             corners = np.array([[a, b, c] for a in (0, 1) for b in (0, 1) for c in (0, 1)], float)
             P = (corners @ app.struct.cell.A.T - app.center) @ app.R.T

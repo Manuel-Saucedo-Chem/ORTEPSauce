@@ -48,9 +48,23 @@ def _parts_compatible(pa, pb):
     return (pa == 0) | (pb == 0) | (pa == pb)
 
 
-def build_model(struct, complete=True, tol=0.45, max_atoms=4000, pack=False):
-    """pack: fill the unit cell - every molecule whose centre lies inside the cell (0 <= x, y, z < 1),
-    completed by symmetry when complete=True."""
+PACK_MOLECULES = 'Whole molecules'
+PACK_ATOMS = 'Atoms in range'
+PACK_LIMIT = 30000
+
+
+def _shifts(lo, hi):
+    return range(int(np.floor(lo)) - 1, int(np.ceil(hi)) + 1)
+
+
+def build_model(struct, complete=True, tol=0.45, max_atoms=4000, pack=False, pack_range=None,
+                pack_mode=PACK_MOLECULES, extra_sites=()):
+    """pack: fill a range of unit cells (default one cell, 0 <= x, y, z < 1).
+    pack_mode 'Whole molecules': every molecule whose centre lies in the range, completed by symmetry;
+    'Atoms in range': every symmetry copy of every atom inside the range (polymers, networks).
+    extra_sites: [(asym index, operator index, (na, nb, nc))] added on top (grown / contact atoms)."""
+    rng = np.array(pack_range if pack_range is not None else ((0, 1), (0, 1), (0, 1)), float)
+    atoms_mode = pack and pack_mode == PACK_ATOMS
     cell = struct.cell
     A = cell.A
     atoms = struct.atoms
@@ -102,7 +116,7 @@ def build_model(struct, complete=True, tol=0.45, max_atoms=4000, pack=False):
                 sites_op.append(g)
                 sites_frac.append(wrapped[j])
                 sites_gen.append(not (ident and np.allclose(wrapped[j], F[j], atol=1e-4)))
-    if complete and len(ops) > 0:
+    if complete and len(ops) > 0 and not atoms_mode:
         frontier = list(range(len(sites_idx)))
         images = [F @ R.T + t for R, t in ops]
         iteration = 0
@@ -137,8 +151,48 @@ def build_model(struct, complete=True, tol=0.45, max_atoms=4000, pack=False):
             if iteration > 60:
                 truncated = True
         if truncated:
-            model.notes.append(f'Growth stopped at {len(sites_idx)} atoms (polymeric structure?).')
-    if pack and len(ops) > 0 and complete and len(sites_idx):
+            if pack:
+                # polymer / network: whole molecules do not exist, pack atoms instead
+                model.notes.append('Polymeric structure: packed as atoms inside the range '
+                                   '(Pack mode "Atoms in range").')
+                atoms_mode = True
+                # back to the symmetry copies of every atom, wrapped into the first cell
+                base = {}
+                for k in range(len(sites_idx)):
+                    f = sites_frac[k] - np.floor(sites_frac[k] + 1e-5)
+                    key = (sites_idx[k], tuple(np.round(f, 3)))
+                    if key not in base:
+                        base[key] = (sites_idx[k], sites_op[k], f, sites_gen[k] or not np.allclose(f, sites_frac[k]))
+                vals = list(base.values())
+                sites_idx = [v[0] for v in vals]
+                sites_op = [v[1] for v in vals]
+                sites_frac = [v[2] for v in vals]
+                sites_gen = [bool(v[3]) for v in vals]
+            else:
+                model.notes.append(f'Growth stopped at {len(sites_idx)} atoms (polymeric structure?).')
+    if atoms_mode and len(ops) > 0 and len(sites_idx):
+        # copies of the wrapped atoms in every cell of the range (edges included, as in Mercury)
+        fr0 = np.array(sites_frac)
+        out_i, out_g, out_f, out_gen = [], [], [], []
+        eps = 1e-3
+        for na in _shifts(*rng[0]):
+            for nb in _shifts(*rng[1]):
+                for nc in _shifts(*rng[2]):
+                    sh = np.array([na, nb, nc], float)
+                    f = fr0 + sh
+                    ok = np.all((f >= rng[:, 0] - eps) & (f <= rng[:, 1] + eps), axis=1)
+                    for k in np.flatnonzero(ok):
+                        out_i.append(sites_idx[k])
+                        out_g.append(sites_op[k])
+                        out_f.append(f[k])
+                        out_gen.append(bool(sites_gen[k] or na or nb or nc))
+                    if len(out_i) > PACK_LIMIT:
+                        break
+        if len(out_i) > PACK_LIMIT:
+            model.notes.append(f'Packing limited to {PACK_LIMIT} atoms: use a smaller range.')
+            out_i, out_g, out_f, out_gen = out_i[:PACK_LIMIT], out_g[:PACK_LIMIT], out_f[:PACK_LIMIT], out_gen[:PACK_LIMIT]
+        sites_idx, sites_op, sites_frac, sites_gen = out_i, out_g, out_f, out_gen
+    if pack and len(ops) > 0 and complete and len(sites_idx) and not atoms_mode:
         # keep each molecule once: the copy whose centre lies inside the cell
         fr_all = np.array(sites_frac)
         cart_all = fr_all @ A.T
@@ -157,17 +211,34 @@ def build_model(struct, complete=True, tol=0.45, max_atoms=4000, pack=False):
         groups = {}
         for k in range(len(sites_idx)):
             groups.setdefault(find(k), []).append(k)
-        keep = []
+        # each molecule once per cell of the range: the copies whose centre lies inside it
+        out_i, out_g, out_f, out_gen = [], [], [], []
+        seen_mol = set()
         for members in groups.values():
             c = fr_all[members].mean(axis=0)
-            if np.all(c >= -1e-4) and np.all(c < 1 - 1e-4):
-                keep += members
-        if keep:
-            keep.sort()
-            sites_idx = [sites_idx[k] for k in keep]
-            sites_op = [sites_op[k] for k in keep]
-            sites_frac = [sites_frac[k] for k in keep]
-            sites_gen = [sites_gen[k] for k in keep]
+            c0 = c - np.floor(c + 1e-4)                         # centre moved into the first cell
+            base = c0 - c
+            for na in _shifts(*rng[0]):
+                for nb in _shifts(*rng[1]):
+                    for nc in _shifts(*rng[2]):
+                        sh = base + np.array([na, nb, nc], float)
+                        cc = c + sh
+                        if not (np.all(cc >= rng[:, 0] - 1e-4) and np.all(cc < rng[:, 1] - 1e-4)):
+                            continue
+                        mk = (min(sites_idx[k] for k in members), tuple(np.round(cc, 2)))
+                        if mk in seen_mol:
+                            continue
+                        seen_mol.add(mk)
+                        for k in members:
+                            out_i.append(sites_idx[k])
+                            out_g.append(sites_op[k])
+                            out_f.append(fr_all[k] + sh)
+                            out_gen.append(bool(sites_gen[k] or np.any(np.abs(sh) > 1e-6)))
+            if len(out_i) > PACK_LIMIT:
+                model.notes.append(f'Packing limited to about {PACK_LIMIT} atoms: use a smaller range.')
+                break
+        if out_i:
+            sites_idx, sites_op, sites_frac, sites_gen = out_i, out_g, out_f, out_gen
 
     if pack and len(sites_idx) > 1:
         # remove copies of the same atom that coincide (special positions, rounding at 3 decimals)
@@ -192,6 +263,26 @@ def build_model(struct, complete=True, tol=0.45, max_atoms=4000, pack=False):
             sites_op = [sites_op[k] for k in keep]
             sites_frac = [sites_frac[k] for k in keep]
             sites_gen = [sites_gen[k] for k in keep]
+
+    if extra_sites and len(ops) > 0:
+        have = {(sites_idx[k], tuple(np.round(sites_frac[k], 3))) for k in range(len(sites_idx))}
+        ident = [g for g, (Rg, tg) in enumerate(ops) if np.allclose(Rg, np.eye(3)) and np.allclose(tg, 0)]
+        for site in extra_sites:
+            try:
+                j, g, sh = int(site[0]), int(site[1]), np.array(site[2], float)
+            except (TypeError, ValueError, IndexError):
+                continue
+            if not (0 <= j < N and 0 <= g < len(ops)):
+                continue
+            f = F[j] @ ops[g][0].T + ops[g][1] + sh
+            key = (j, tuple(np.round(f, 3)))
+            if key in have:
+                continue
+            have.add(key)
+            sites_idx.append(j)
+            sites_op.append(g)
+            sites_frac.append(f)
+            sites_gen.append(not (g in ident and np.allclose(f, F[j], atol=1e-4)))
 
     n = len(sites_idx)
     fr = np.array(sites_frac)

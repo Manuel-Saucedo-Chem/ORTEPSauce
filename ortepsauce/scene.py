@@ -48,7 +48,8 @@ def build_scene(model, R, center, settings, styles, cell=None):
     is_h = model.is_h() if n else np.zeros(0, bool)
     visible = np.ones(n, bool)
     if not s.show_h:
-        visible &= ~is_h
+        visible &= ~is_h | np.array([f'{model.labels[k]}|{model.symop[k]}' in s.shown_h
+                                       for k in range(n)], bool) if getattr(s, 'shown_h', None) else ~is_h
     if getattr(s, 'excluded', None):
         visible &= np.array([lab not in s.excluded for lab in model.labels], bool)
     if getattr(s, 'hidden_keys', None):

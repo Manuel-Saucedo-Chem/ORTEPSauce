@@ -35,9 +35,10 @@ from .raster import render_scene
 from .scene import build_scene
 from .settings import RenderSettings
 from .shelx_reader import read_shelx
+from .appsettings import SettingsMixin
 from .si import caption as si_caption
 from .si import identify_solvents, solvent_phrase
-from .styles import (ATOM_STYLES, ELLIPSE_STYLES, FINISH_NAMES, OBJECT_TARGETS, POV_COLORS,
+from .styles import (ATOM_STYLES, VECTOR_STYLES, ELLIPSE_STYLES, FINISH_NAMES, OBJECT_TARGETS, POV_COLORS,
                      TEXTURE_NAMES, StyleTable, color_rgb, hex_to_rgb, rgb_to_hex)
 from .view import default_orientation, fit_scale, orthonormalize, rot_x, rot_y, rot_z, view_along
 
@@ -54,6 +55,32 @@ CONFIG_PATH = os.path.join(os.path.expanduser('~'), '.ortepsauce.json')
 def _natkey(text):
     import re
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r'(\d+)', text)]
+
+
+ICON_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def set_window_icon(win):
+    """Program icon on a window (Windows: .ico, which customtkinter would otherwise replace with its own
+    icon 200 ms after the window opens; elsewhere: PNG)."""
+    ico, png = os.path.join(ICON_DIR, 'icon.ico'), os.path.join(ICON_DIR, 'icon.png')
+    try:
+        if sys.platform == 'win32' and os.path.exists(ico):
+            win.iconbitmap(ico)
+            win.after(250, lambda: _safe(lambda: win.iconbitmap(ico)))
+        elif os.path.exists(png):
+            img = tk.PhotoImage(file=png)
+            win.iconphoto(True, img)
+            win._ortepsauce_icon = img            # keep a reference
+    except Exception:  # noqa: BLE001 - an icon is never worth an error
+        pass
+
+
+def _safe(fn):
+    try:
+        fn()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def load_config():
@@ -123,11 +150,12 @@ def find_povray():
     return None
 
 
-class OrtepApp(ctk.CTk):
+class OrtepApp(SettingsMixin, ctk.CTk):
     def __init__(self, path=None):
         super().__init__()
         ctk.set_appearance_mode('system')
         self.title(f'ORTEPSauce {__version__}')
+        set_window_icon(self)
         self.geometry('1400x900')
         self.minsize(1000, 650)
 
@@ -163,12 +191,19 @@ class OrtepApp(ctk.CTk):
         self.progress = ctk.CTkProgressBar(self.bottom, width=320)
         self.progress.set(0)
         ctk.CTkButton(self.bottom, text='⌨ Hotkeys (F1)', width=120, command=self.show_hotkeys).pack(side='right')
+        ctk.CTkButton(self.bottom, text='📖 Tutorial', width=100, command=self.show_tutorial
+                      ).pack(side='right', padx=(0, 6))
+        ctk.CTkButton(self.bottom, text='⚙ Settings & updates', width=150, fg_color='gray45', hover_color='gray35',
+                      command=self.show_settings).pack(side='right', padx=(0, 6))
+        ctk.CTkButton(self.bottom, text='❝ Citation', width=96, fg_color='gray45', hover_color='gray35',
+                      command=self.show_citation).pack(side='right', padx=(0, 6))
         self.cancel_btn = ctk.CTkButton(self.bottom, text='✕ Cancel', width=80, fg_color='#a32020',
                                         command=self.cancel_job)
         self.protocol('WM_DELETE_WINDOW', self.on_close)
         self.toaster = Toaster(self)
         self._exclude_mode = False
         self._wire_mode = False
+        self._hadd_mode = False
         self._geo_mode = None
         self.geo_metal = None
         self.geo_ligands = []
@@ -186,6 +221,7 @@ class OrtepApp(ctk.CTk):
         self._commit_job = None
         self._restoring = False
         self.cfg = load_config()
+        self._migrate_defaults()
         self._factory = self._snapshot()                 # program defaults, before the user's own
         for name in self.TAB_SPEC:
             saved = (self.cfg.get('tab_defaults') or {}).get(name)
@@ -198,8 +234,76 @@ class OrtepApp(ctk.CTk):
         self.bind_all('<ButtonRelease>', self._event_boundary, add='+')
         self.bind_all('<KeyRelease>', self._event_boundary, add='+')
         self._bind_hotkeys()
+        self._tut = None
         if path:
             self.after(150, lambda: self.open_file(path))
+        if not os.environ.get('ORTEPSAUCE_NO_STARTUP_POPUPS'):
+            if not self.cfg.get('tutorial_seen') or self.cfg.get('tutorial_at_startup'):
+                self.after(700, self.show_tutorial)        # first start: show how things work
+            self.after(2500, self.check_updates)            # quiet daily check in the background
+            self.after(900, self.startup_checks)            # result of an update, lab settings file
+
+    # program defaults that changed: saved defaults still holding the OLD program value are moved to
+    # the new one (a value the user picked on purpose is left alone). (revision, tab, key, old, new)
+    DEFAULT_CHANGES = [
+        (1, 'SI', 'geo_caption', False, True),
+        (1, 'SI', 'vb_caption', False, True),
+        (1, 'SI', 'si_refs', True, False),
+    ]
+    DEFAULTS_REV = 1
+
+    def _migrate_defaults(self):
+        rev = self.cfg.get('defaults_rev')
+        if rev is None:
+            rev = 1 if 'defaults_version' in self.cfg else 0   # development builds already migrated
+        changed = False
+        for r, tab, key, old, new in self.DEFAULT_CHANGES:
+            if rev >= r:
+                continue
+            d = ((self.cfg.get('tab_defaults') or {}).get(tab) or {}).get('vars') or {}
+            if key in d and d[key] == old:
+                d[key] = new
+                changed = True
+        if self.cfg.get('defaults_rev') != self.DEFAULTS_REV or 'defaults_version' in self.cfg:
+            self.cfg['defaults_rev'] = self.DEFAULTS_REV
+            self.cfg.pop('defaults_version', None)
+            changed = True
+        if changed:
+            save_config(self.cfg)
+
+    # ================================================================== tutorial / updates / citation
+    def show_citation(self):
+        """How to cite ORTEPSauce: the text, a copy button and the DOI link."""
+        import webbrowser
+        from .citations import ORTEPSAUCE_CITATION, ORTEPSAUCE_URL
+        w = self._dialog('Cite ORTEPSauce', '560x300')
+        ctk.CTkLabel(w, text='How to cite ORTEPSauce', font=ctk.CTkFont(size=17, weight='bold'), anchor='w'
+                     ).pack(fill='x', padx=14, pady=(14, 2))
+        ctk.CTkLabel(w, text='If ORTEPSauce helped with figures, captions or analysis in your work, please cite:',
+                     anchor='w', justify='left', wraplength=520).pack(fill='x', padx=14)
+        box = ctk.CTkTextbox(w, height=80, wrap='word', font=ctk.CTkFont(size=14))
+        box.pack(fill='x', padx=14, pady=8)
+        box.insert('1.0', ORTEPSAUCE_CITATION)
+        box.configure(state='disabled')
+
+        def copy():
+            self.clipboard_clear()
+            self.clipboard_append(ORTEPSAUCE_CITATION)
+            self.toast('Citation copied to the clipboard', 'ok')
+        row = ctk.CTkFrame(w, fg_color='transparent')
+        row.pack(fill='x', padx=14, pady=(4, 12))
+        ctk.CTkButton(row, text='Copy citation', command=copy).pack(side='left', expand=True, fill='x', padx=2)
+        ctk.CTkButton(row, text='Open DOI (Zenodo)', command=lambda: webbrowser.open(ORTEPSAUCE_URL)
+                      ).pack(side='left', expand=True, fill='x', padx=2)
+        ctk.CTkButton(row, text='Close', fg_color='gray50', command=w.destroy
+                      ).pack(side='left', expand=True, fill='x', padx=2)
+
+    def show_tutorial(self, page=0):
+        from .tutorial import Tutorial
+        if self._tut is not None and self._tut.exists():
+            self._tut.w.lift()
+            return
+        self._tut = Tutorial(self, page, on_close=lambda: save_config(self.cfg))
 
     # ================================================================== undo / redo of every change
     UNDO_SKIP_VARS = {'block_var', 'ctarget_var', 'starget_var'}
@@ -288,7 +392,8 @@ class OrtepApp(ctk.CTk):
     def _struct_key(self):
         s = self.s
         return (self.grow_var.get(), self.tol_var.get(), self.pack_var.get(), repr(s.centroids),
-                repr(sorted(s.custom_bonds.items())), repr(sorted(s.deleted_bonds)))
+                repr(sorted(s.custom_bonds.items())), repr(sorted(s.deleted_bonds)),
+                repr(s.pack_range), s.pack_mode, repr(s.extra_sites))
 
     def _sync_sliders(self):
         for key, (sl, val, fmt) in getattr(self, '_sliders', {}).items():
@@ -345,9 +450,10 @@ class OrtepApp(ctk.CTk):
     # ================================================================== per-tab defaults
     TAB_SPEC = {
         'Structure': dict(vars=['grow_var', 'h_var', 'cell_var', 'pack_var', 'wire_lab_var', 'tol_var', 'q_var',
-                                'qn_var', 'wire_r_var', 'cg_r_var'],
+                                'qn_var', 'wire_r_var', 'cg_r_var', 'pr_a0', 'pr_a1', 'pr_b0', 'pr_b1',
+                                'pr_c0', 'pr_c1', 'pack_mode_var', 'ctol_var', 'clab_var'],
                           s=['show_h', 'show_cell', 'show_q', 'q_count', 'wire_labels', 'wire_radius',
-                             'centroid_radius']),
+                             'centroid_radius', 'pack_range', 'pack_mode', 'contact_tol', 'contact_labels']),
         'Labels': dict(vars=['lab_on', 'lab_which', 'lab_font', 'lab_size', 'lab_bold', 'lab_italic', 'lab_color',
                              'lab_halo', 'lab_elem', 'lab_suffix'],
                        s=['labels_on', 'label_which', 'label_font', 'label_size', 'label_bold', 'label_italic',
@@ -364,7 +470,8 @@ class OrtepApp(ctk.CTk):
                              'gif_shadow', 'gif_trans', 'gif_matte', 'w_px', 'h_px', 'aa_var', 'engine_var', 'refl_var',
                              'lsize_mode', 'gif_frames', 'gif_deg', 'gif_delay', 'gif_w', 'gif_h', 'gif_grain',
                              'pov_labels'], s=[]),
-        'SI': dict(vars=['si_fig', 'si_auto', 'si_merge', 'si_solv', 'geo_caption'], s=[]),
+        'SI': dict(vars=['si_fig', 'si_auto', 'si_merge', 'si_solv', 'geo_caption', 'vb_R', 'vb_scale', 'vb_mesh',
+                         'vb_h', 'vb_caption', 'si_refs'], s=[]),
     }
 
     def _tab_state(self, name):
@@ -600,6 +707,7 @@ class OrtepApp(ctk.CTk):
         """Toplevel that stays in front of the main window (transient) and gets the focus."""
         w = ctk.CTkToplevel(self)
         w.title(title)
+        set_window_icon(w)
         if geometry:
             w.geometry(geometry)
         w.transient(self)
@@ -649,7 +757,11 @@ class OrtepApp(ctk.CTk):
 
     # ---- GPU view helpers
     def _gl_active(self):
-        return self.gl is not None and self.gl.failed is None and self.s.atom_style in GL_STYLES
+        if self.gl is None or self.gl.failed is not None or self.s.atom_style not in GL_STYLES:
+            return False
+        if self.s.atom_style in ('RMSD surface', 'MSD surface') and self.gl.ready and self.gl.prog_m is None:
+            return False                       # mesh shader unavailable: software view
+        return True
 
     def _show_view(self):
         mpl_w = self.canvas.get_tk_widget()
@@ -742,10 +854,9 @@ class OrtepApp(ctk.CTk):
         self._switch(t, 'Complete molecules (symmetry)', self.grow_var, self.rebuild)
         self.h_var = tk.BooleanVar(value=self.s.show_h)
         self._switch(t, 'Hydrogen atoms', self.h_var, self.on_setting)
+        self.hadd_btn = self._button(t, 'H add  –  show the H atoms of clicked atoms', self.toggle_hadd_mode)
         self.cell_var = tk.BooleanVar(value=False)
         self._switch(t, 'Unit cell', self.cell_var, self.on_setting)
-        self.pack_var = tk.BooleanVar(value=False)
-        self._switch(t, 'Pack unit cell', self.pack_var, self.on_pack)
 
         self._section(t, 'Exclude atoms')
         self.excl_btn = self._button(t, 'Exclude atoms (click)  Ctrl+E', self.toggle_exclude)
@@ -768,6 +879,39 @@ class OrtepApp(ctk.CTk):
         self.edit_lbl = self._note(t, 'Select ring atoms and press C for a centroid. Click a bond and press '
                                       'Delete to remove it. Select 2+ atoms (metal first) and press Ctrl+B to '
                                       'draw solid, dashed or dotted bonds.')
+
+        self._section(t, 'Packing, molecules & contacts')
+        self.pack_var = tk.BooleanVar(value=False)
+        self._switch(t, 'Pack unit cell', self.pack_var, self.on_pack)
+        grid = ctk.CTkFrame(t, fg_color='transparent')
+        grid.pack(fill='x', padx=6, pady=2)
+        ctk.CTkLabel(grid, text='Range', anchor='w').grid(row=0, column=0, sticky='w')
+        ctk.CTkLabel(grid, text='from').grid(row=0, column=1)
+        ctk.CTkLabel(grid, text='to').grid(row=0, column=2)
+        self.pr_vars = []
+        for r, ax_ in enumerate('abc'):
+            lo, hi = self.s.pack_range[r]
+            v0, v1 = tk.StringVar(value=f'{lo:g}'), tk.StringVar(value=f'{hi:g}')
+            self.pr_vars += [v0, v1]
+            ctk.CTkLabel(grid, text=f'  {ax_}').grid(row=r + 1, column=0, sticky='w')
+            for c, v in ((1, v0), (2, v1)):
+                e = ctk.CTkEntry(grid, textvariable=v, width=62)
+                e.grid(row=r + 1, column=c, padx=3, pady=1)
+                e.bind('<Return>', lambda ev: self.apply_pack_range())
+        self.pr_a0, self.pr_a1, self.pr_b0, self.pr_b1, self.pr_c0, self.pr_c1 = self.pr_vars
+        self.pack_mode_var = tk.StringVar(value=self.s.pack_mode)
+        self._option(t, 'Pack', self.pack_mode_var, ['Whole molecules', 'Atoms in range'], lambda: None)
+        self._button_row(t, [('Pack this range', self.apply_pack_range), ('Molecules…', self.show_molecules)])
+        self._button_row(t, [('Grow bonds +1', self.grow_selected), ('Complete molecule', self.complete_selected)])
+        self._button_row(t, [('Short contacts', self.contacts_selected), ('Remove grown', self.clear_grown)])
+        self.ctol_var = tk.StringVar(value=f'{self.s.contact_tol:g}')
+        self._entry(t, 'Contact: d < vdW sum +', self.ctol_var, self._read_contact_tol, width=60)
+        self.clab_var = tk.BooleanVar(value=self.s.contact_labels)
+        self._switch(t, 'Distances on contact lines', self.clab_var, self.on_contact_labels)
+        self._note(t, 'Select atoms first. Grow adds the atoms bonded across symmetry (polymers: one step '
+                      'per click). Complete adds whole molecules. Short contacts adds the neighbouring '
+                      'molecules closer than the vdW sum and draws dashed lines with the distance. '
+                      'Double click = whole molecule; right click for more.')
 
         self._section(t, 'Structure info')
         self.info = ctk.CTkTextbox(t, height=200, wrap='word', font=ctk.CTkFont(family='Courier', size=12))
@@ -794,7 +938,14 @@ class OrtepApp(ctk.CTk):
         self.lab_on = tk.BooleanVar(value=s.labels_on)
         sw = ctk.CTkSwitch(t, text='Show labels', variable=self.lab_on, command=self.on_labels,
                            font=ctk.CTkFont(size=14, weight='bold'))
-        sw.pack(anchor='w', padx=6, pady=(10, 6))
+        sw.pack(anchor='w', padx=6, pady=(10, 2))
+        hint = ctk.CTkFrame(t, fg_color=('#e3eefb', '#1d3550'), corner_radius=6)
+        hint.pack(fill='x', padx=6, pady=(2, 8))
+        ctk.CTkLabel(hint, text='🏷  Click an atom (Shift+drag for many) and press  L  to show its label.\n'
+                                'L with nothing selected toggles all labels.\n'
+                                'Ctrl + drag a label to move it.',
+                     anchor='w', justify='left', wraplength=280, font=ctk.CTkFont(size=12)
+                     ).pack(fill='x', padx=8, pady=6)
         self.lab_which = tk.StringVar(value=s.label_which)
         self._option(t, 'Label atoms', self.lab_which, ['All', 'Non-H', 'Heavy atoms', 'Metals only'],
                      self.on_labels)
@@ -1287,6 +1438,16 @@ class OrtepApp(ctk.CTk):
             b.configure(border_color='#1f6aa5' if n == self.s.atom_style else ('gray75', 'gray30'))
 
     def set_style(self, name):
+        if name == 'ORTEP-3 classic' and self.s.atom_style != name:
+            # the old-style look: plain (non-bold, upright) black Arial labels
+            self.lab_bold.set(False)
+            self.lab_italic.set(False)
+            self.lab_elem.set(False)
+            self.lab_halo.set(False)
+            self.lab_font.set('Arial')
+            self.lab_color.set('Black')
+            self.s.label_color = 'Black'
+            self.on_labels()
         self.s.atom_style = name
         self._show_view()
         self._highlight_style()
@@ -1538,9 +1699,43 @@ class OrtepApp(ctk.CTk):
                                                                             fill='x', padx=(2, 0))
         self.geo_text = ctk.CTkTextbox(t, height=170, wrap='word', font=ctk.CTkFont(size=13))
         self.geo_text.pack(fill='x', padx=6, pady=4)
-        self.geo_caption = tk.BooleanVar(value=False)
+        self.geo_caption = tk.BooleanVar(value=True)
         self._switch(t, 'Add the geometry index to the caption', self.geo_caption, lambda: self.update_si(force=True))
         ctk.CTkButton(t, text='Copy geometry index', command=self.copy_geo).pack(fill='x', padx=6, pady=(3, 10))
+
+        self._section(t, 'Buried volume (%V_bur)')
+        self._note(t, 'Centre: the metal of the geometry index above (automatic, or "Metal center"). '
+                      'Atoms: the whole complex, or one ligand – double click the ligand (or select its '
+                      'atoms) and press "Ligand = selection". Grid method as in SambVca.')
+        self.vbur_lig = None
+        row = ctk.CTkFrame(t, fg_color='transparent')
+        row.pack(fill='x', padx=6, pady=3)
+        ctk.CTkButton(row, text='Ligand = selection', width=40, command=self.vbur_use_selection
+                      ).pack(side='left', expand=True, fill='x', padx=(0, 2))
+        ctk.CTkButton(row, text='Whole complex', width=40, command=self.vbur_use_all
+                      ).pack(side='left', expand=True, fill='x', padx=(2, 0))
+        self.vb_R = tk.StringVar(value='3.5')
+        self._entry(t, 'Sphere radius (Å)', self.vb_R, lambda: self.update_vbur(), width=70)
+        self.vb_scale = tk.StringVar(value='1.17')
+        self._entry(t, 'Bondi radii × ', self.vb_scale, lambda: self.update_vbur(), width=70)
+        self.vb_mesh = tk.StringVar(value='0.10')
+        self._entry(t, 'Mesh (Å)', self.vb_mesh, lambda: self.update_vbur(), width=70)
+        self.vb_h = tk.BooleanVar(value=False)
+        self._switch(t, 'Include hydrogen atoms', self.vb_h, lambda: self.update_vbur())
+        ctk.CTkButton(t, text='Calculate %V_bur', command=lambda: self.update_vbur(force=True)
+                      ).pack(fill='x', padx=6, pady=3)
+        self.vb_text = ctk.CTkTextbox(t, height=170, wrap='word', font=ctk.CTkFont(size=13))
+        self.vb_text.pack(fill='x', padx=6, pady=4)
+        self.vb_caption = tk.BooleanVar(value=True)
+        self._switch(t, 'Add %V_bur to the caption', self.vb_caption, lambda: self.update_si(force=True))
+        ctk.CTkButton(t, text='Copy %V_bur', command=self.copy_vbur).pack(fill='x', padx=6, pady=3)
+
+        self._section(t, 'References')
+        self.si_refs = tk.BooleanVar(value=False)
+        self._switch(t, 'Add references to the caption (τ₄, τ₄′, τ₅, %V_bur)', self.si_refs,
+                     lambda: self.update_si(force=True))
+        self._note(t, 'Numbered [1], [2] … in the caption, with the full references (ACS style) below it.')
+        ctk.CTkButton(t, text='Copy all references', command=self.copy_refs).pack(fill='x', padx=6, pady=(3, 10))
 
     def update_si(self, force=False):
         if not hasattr(self, 'si_text') or self.model is None:
@@ -1559,12 +1754,29 @@ class OrtepApp(ctk.CTk):
                                             suffix=s.sym_suffix or '*', merge_equivalent=self.si_merge.get(),
                                             generated_visible=gen_vis, excluded=self.s.excluded,
                                             hidden_keys=self.s.hidden_keys,
+                                            shown_h=self._shown_h_names(),
                                             mention_solvent=self.si_solv.get())
         res = self.update_geometry()
+        from .citations import NEEDS, RefList
+        refs = RefList()
+        use_refs = self.si_refs.get()
+
+        def cite(qty):
+            return refs.cite(*NEEDS.get(qty, [])) if use_refs else ''
         if self.geo_caption.get() and res:
-            sent = gi.caption_sentence(res, self._geo_name)
-            if sent:
-                text = text.rstrip() + ' ' + sent
+            parts = []
+            for r in res:
+                if r['values']:
+                    vals = ' and '.join(f'{k} = {v:.2f}{cite(k)}' for k, v in r['values'].items())
+                    parts.append(f'{vals} ({self._geo_name(r["centre"])})')
+            if parts:
+                many = len(parts) > 1 or len(res[0]['values']) > 1
+                text = text.rstrip() + ' Geometry ' + ('indices' if many else 'index') + ': ' + '; '.join(parts) + '.'
+        vb = self.update_vbur() if self.vb_caption.get() else None
+        if vb:
+            text = text.rstrip() + ' ' + vb['sentence'].replace('{cite}', cite('%Vbur'))
+        if use_refs and refs.keys:
+            text = text.rstrip() + '\n\n' + refs.text()
         self.si_text.delete('1.0', 'end')
         self.si_text.insert('1.0', text)
         if nb + na == 0:
@@ -1602,8 +1814,15 @@ class OrtepApp(ctk.CTk):
             return []
         res = self.geometry_results()
         if res:
+            from .citations import NEEDS, REFS
             mode = 'manual' if self.geo_metal else 'automatic'
             body = f'({mode} selection)\n\n' + '\n\n'.join(r['text'] for r in res)
+            keys = []
+            for r in res:
+                for q in r['values']:
+                    keys += [k for k in NEEDS.get(q, []) if k not in keys]
+            if keys:
+                body += '\n\nPlease cite:\n' + '\n'.join(REFS[k] for k in keys)
         else:
             body = ('No metal centre with ligands found. Press "Metal center" and click the metal, then '
                     '"Ligands" and click the coordinating atoms.')
@@ -1616,6 +1835,8 @@ class OrtepApp(ctk.CTk):
         return res
 
     def toggle_geo_mode(self, mode):
+        if getattr(self, '_hadd_mode', False):
+            self.toggle_hadd_mode()
         if self.model is None:
             return
         if mode == 'ligands' and not self.geo_metal:
@@ -1685,6 +1906,126 @@ class OrtepApp(ctk.CTk):
         self.view.highlight = hl
         self.redraw_overlay()
 
+    # ------------------------------------------------------------------ buried volume
+    def _vbur_centre(self):
+        res = self.geometry_results()
+        if res:
+            return res[0]['centre']
+        m = self.model
+        metals = [i for i in range(m.n) if m.elements[i] not in gi.NOT_CENTRE]
+        return metals[0] if metals else None
+
+    def vbur_use_selection(self):
+        if self.model is None or not self.selection:
+            self.toast('Select the ligand first (double click one of its atoms), then press "Ligand = selection"')
+            return
+        c = self._vbur_centre()
+        self.vbur_lig = [atom_key(self.model, i) for i in self.selection if i != c]
+        self.selection = []                    # done with it: keep the SI bond list short
+        self.update_status()
+        self.redraw_overlay()
+        self.toast(f'%V_bur: ligand = {len(self.vbur_lig)} atoms (selection cleared)')
+        self.update_vbur(force=True)
+        self.update_si()
+
+    def vbur_use_all(self):
+        self.vbur_lig = None
+        self.toast('%V_bur: whole complex (every atom of the molecule except the metal)')
+        self.update_vbur(force=True)
+        self.update_si()
+
+    def _vb_params(self):
+        def num(var, default, lo, hi):
+            try:
+                v = float(var.get().replace(',', '.'))
+                if lo <= v <= hi:
+                    return v
+            except ValueError:
+                pass
+            var.set(f'{default:g}')
+            return default
+        return (num(self.vb_R, 3.5, 1.0, 10.0), num(self.vb_scale, 1.17, 0.5, 2.0),
+                num(self.vb_mesh, 0.10, 0.02, 0.5), bool(self.vb_h.get()))
+
+    def update_vbur(self, force=False):
+        """Compute %V_bur (cached); fills the box. Returns the result dict or None."""
+        if not hasattr(self, 'vb_text') or self.model is None:
+            return None
+        from .buried_volume import buried_volume
+        from .citations import REFS
+        m, s = self.model, self.s
+        c = self._vbur_centre()
+        if c is None:
+            self._set_vb_text('No metal centre found. Choose one with "Metal center" (Geometry index).')
+            return None
+        R, scale, mesh, inc_h = self._vb_params()
+        is_h = m.is_h()
+        if self.vbur_lig is None:
+            pool = [k for k in self._fragment_of(c) if k != c]
+            what = 'whole complex'
+        else:
+            idx = {atom_key(m, i): i for i in range(m.n)}
+            pool = [idx[k] for k in self.vbur_lig if k in idx and idx[k] != c]
+            what = f'selected ligand ({len(pool)} atoms)'
+        atoms = [k for k in pool if m.elements[k] not in ('Cg', 'Q') and (inc_h or not is_h[k])
+                 and m.labels[k] not in s.excluded and atom_key(m, k) not in s.hidden_keys]
+        key = (atom_key(m, c), tuple(atom_key(m, k) for k in atoms), R, scale, mesh, inc_h, m.n)
+        cache = getattr(self, '_vb_cache', None)
+        if cache is not None and cache[0] == key:
+            res = cache[1]
+        else:
+            if not atoms:
+                self._set_vb_text('No atoms to count (check the ligand selection and the excluded atoms).')
+                return None
+            z_dir = x_dir = None
+            donors = [k for k in atoms if any({int(a), int(b)} == {c, k} for a, b in m.bonds)]
+            if self.vbur_lig is not None and donors:
+                z_dir = m.cart[donors].mean(axis=0) - m.cart[c]
+                d0 = donors[0]
+                nb = [int(b) if int(a) == d0 else int(a) for a, b in m.bonds if d0 in (int(a), int(b))]
+                nb = [k for k in nb if k != c and k in atoms]
+                if nb:
+                    x_dir = m.cart[nb[0]] - m.cart[d0]
+            res = buried_volume(m.cart[c], m.cart[atoms], [m.elements[k] for k in atoms], R, scale, mesh,
+                                z_dir=z_dir, x_dir=x_dir)
+            self._vb_cache = (key, res)
+        name = self._geo_name(c)
+        hs = 'included' if inc_h else 'excluded'
+        lines = [f'%V_bur({name}) = {res["percent"]:.1f} %    (%V_free = {res["free"]:.1f} %)',
+                 f'Atoms: {what}; {res["n_atoms"]} atoms reach into the sphere.',
+                 f'Sphere radius {R:g} Å centred on {name}, Bondi radii × {scale:g}, mesh {mesh:.2f} Å, '
+                 f'H atoms {hs}.']
+        q = res.get('quadrants')
+        if q:
+            lines.append('Quadrants (z: metal → donor atom, x: towards the donor\'s first neighbour): '
+                         + ', '.join(f'{k} {v:.1f} %' for k, v in q.items()))
+        lines.append('')
+        lines.append('Please cite:')
+        from .citations import NEEDS
+        lines += [REFS[k] for k in NEEDS['%Vbur']]
+        self._set_vb_text('\n'.join(lines))
+        res['sentence'] = f'%V_bur({name}) = {res["percent"]:.1f}%{{cite}}.'
+        return res
+
+    def _set_vb_text(self, txt):
+        self.vb_text.delete('1.0', 'end')
+        self.vb_text.insert('1.0', txt)
+
+    def copy_vbur(self):
+        txt = self.vb_text.get('1.0', 'end').strip()
+        self.clipboard_clear()
+        self.clipboard_append(txt)
+        self.toast('%V_bur copied to the clipboard', 'ok')
+
+    def copy_refs(self):
+        from .citations import REFS, RefList
+        r = RefList()
+        for k in REFS:
+            r.num(k)
+        self.clipboard_clear()
+        self.clipboard_append(r.text())
+        self.toast('All references copied to the clipboard', 'ok')
+
     def copy_geo(self):
         txt = self.geo_text.get('1.0', 'end').strip()
         self.clipboard_clear()
@@ -1740,8 +2081,8 @@ class OrtepApp(ctk.CTk):
         self._spin_job = self.after(16, self._spin_tick)
 
     # ------------------------------------------------------------------ toasts / hotkeys
-    def toast(self, text, kind='info'):
-        self.toaster.show(text, kind)
+    def toast(self, text, kind='info', ms=2600):
+        self.toaster.show(text, kind, ms)
 
     HOTKEYS = [
         ('Ctrl + O', 'Open structure'), ('Ctrl + S', 'Save image'), ('Ctrl + G', 'Save rotating GIF'),
@@ -1752,12 +2093,15 @@ class OrtepApp(ctk.CTk):
         ('Ctrl + B', 'Bond selected atoms: solid / dashed / dotted'),
         ('Click a bond', 'Select it (Delete removes it)'),
         ('Ctrl + Z / Ctrl + Y', 'Undo / redo any change'), ('Ctrl + H', 'Hydrogen atoms on / off'),
-        ('L', 'Labels off / on; with atoms selected: label only those'), ('Ctrl + R', 'Reset view'), ('Ctrl + F', 'Fit to window'),
+('L', 'Labels off / on; with atoms selected: add (or remove) their labels'), ('Ctrl + R', 'Reset view'), ('Ctrl + F', 'Fit to window'),
         ('Space', 'Spin preview on / off'), ('Esc', 'Clear selection / leave exclude or wire mode'),
         ('F1', 'This list'), ('Left drag', 'Rotate'), ('Middle / Alt + drag', 'Spin in the screen plane'),
         ('Shift + drag', 'Box: select everything inside'), ('Right click', 'Hide a molecule / solvent, rotate around an atom'),
         ('Right drag', 'Pan'), ('Wheel, + / -', 'Zoom'), ('Arrow keys', 'Rotate by the arrow-key step'),
-        ('Click atoms', 'Select (2-4: distance / angle / torsion)'), ('Ctrl + drag label', 'Move a label'),
+        ('Click atoms', 'Select (2-4: distance / angle / torsion)'),
+        ('Double click', 'Select the whole molecule / fragment'),
+        ('H add (Structure tab)', 'Click atoms to show their H atoms while hydrogens are off'),
+        ('Right click a selection', 'Grow bonds +1, complete molecules, short contacts, show only …'), ('Ctrl + drag label', 'Move a label'),
     ]
 
     def _bind_hotkeys(self):
@@ -1835,17 +2179,289 @@ class OrtepApp(ctk.CTk):
         self.on_setting()
         self.toast(f'Unit cell packed: {self.model.n} atoms' if on else 'Packing off')
 
+    # ------------------------------------------------------------------ packing, growing, contacts
+    def apply_pack_range(self):
+        if self.struct is None:
+            return
+        try:
+            vals = [float(v.get().replace(',', '.')) for v in self.pr_vars]
+        except ValueError:
+            self.toast('Packing range: type numbers, e.g. a from 0 to 2', 'warn')
+            return
+        rng = tuple((vals[2 * k], vals[2 * k + 1]) for k in range(3))
+        if any(hi <= lo for lo, hi in rng):
+            self.toast('Packing range: "to" must be larger than "from"', 'warn')
+            return
+        cells = np.prod([hi - lo for lo, hi in rng])
+        if cells > 64:
+            self.toast(f'That is {cells:g} unit cells – it may be slow and is capped at 30 000 atoms.', 'warn')
+        self.s.pack_range = rng
+        self.s.pack_mode = self.pack_mode_var.get()
+        if not self.pack_var.get():
+            self.pack_var.set(True)
+        self.status.configure(text='Packing …')
+        self.update_idletasks()
+        self.rebuild()
+        if self.model is not None and self.model.n:
+            self.center = self.model.cart.mean(axis=0)
+            self.fit_view(redraw=False)
+        self.on_setting()
+        extra = '  (' + self.model.notes[-1] + ')' if self.model.notes and 'ack' in self.model.notes[-1] else ''
+        self.toast(f'Packed a {rng[0][0]:g}–{rng[0][1]:g}, b {rng[1][0]:g}–{rng[1][1]:g}, '
+                   f'c {rng[2][0]:g}–{rng[2][1]:g}: {self.model.n} atoms' + extra, ms=4500)
+
+    def _read_contact_tol(self):
+        try:
+            self.s.contact_tol = float(self.ctol_var.get().replace(',', '.'))
+        except ValueError:
+            self.ctol_var.set(f'{self.s.contact_tol:g}')
+
+    def on_contact_labels(self):
+        self.s.contact_labels = self.clab_var.get()
+        self.redraw_overlay()
+
+    def _tol(self):
+        try:
+            return float(self.tol_var.get())
+        except ValueError:
+            return 0.45
+
+    def _need_selection(self, what):
+        if self.model is None or not self.selection:
+            self.toast(f'Select atoms first (click, Shift + drag or double click), then {what}')
+            return False
+        if not self.struct.symops:
+            self.toast('No symmetry operators in this file', 'warn')
+            return False
+        return True
+
+    def _add_sites(self, sites, select_new=False):
+        """Add grown atoms (sites) to the model, keep the selection, optionally select the new atoms."""
+        from .packing import model_index_by_site, site_frac
+        self.s.extra_sites = list(self.s.extra_sites) + [s for s in sites if s not in self.s.extra_sites]
+        self.rebuild()
+        if select_new:
+            idx = model_index_by_site(self.struct, self.model)
+            new = []
+            for st in sites:
+                k = idx.get((st[0], tuple(np.round(site_frac(self.struct, st), 3))))
+                if k is not None and k not in new:
+                    new.append(k)
+            vis = self._visible_mask()
+            self.selection = [k for k in new if vis[k]] or new
+        if self.gl is not None:
+            self.gl.dirty = True
+        self.update_status()
+        self.update_si()
+        self.request_redraw()
+
+    def grow_selected(self):
+        """Polymer expansion: add the atoms bonded to the selected atoms across symmetry (one step)."""
+        if not self._need_selection('press Grow'):
+            return
+        from .packing import bonded_neighbours
+        sites = bonded_neighbours(self.struct, self.model, list(self.selection), self._tol())
+        if not sites:
+            self.toast('Nothing more is bonded to the selected atoms (use Short contacts for neighbours)')
+            return
+        self._add_sites(sites, select_new=True)
+        self.toast(f'{len(sites)} bonded atom(s) added and selected – press Grow again to continue')
+
+    def complete_selected(self):
+        if not self._need_selection('press Complete'):
+            return
+        from .packing import complete_from
+        sites, trunc = complete_from(self.struct, model=self.model, start=list(self.selection), tol=self._tol(),
+                                     max_new=max(4 * len(self.struct.atoms), 400))
+        if not sites:
+            self.toast('The selected molecules are already complete')
+            return
+        self._add_sites(sites)
+        self.toast(f'{len(sites)} atom(s) added' + ('  –  polymer: growth capped, use Grow for more steps'
+                                                    if trunc else ''), 'warn' if trunc else 'ok')
+
+    def contacts_selected(self):
+        """Mercury-style short contacts: neighbouring molecules closer than the vdW sum, with dashed
+        lines and distances."""
+        if not self._need_selection('press Short contacts'):
+            return
+        from .packing import complete_from, model_index_by_site, short_contacts, site_frac
+        self._read_contact_tol()
+        m = self.model
+        inc_h = bool(self.s.show_h or self.s.shown_h)
+        cons = short_contacts(self.struct, m, list(self.selection), self.s.contact_tol, include_h=inc_h,
+                              fragment_of=self._fragment_of)
+        if not cons:
+            self.toast(f'No contacts shorter than the vdW sum + {self.s.contact_tol:g} Å from the selected atoms')
+            return
+        keys_i = {i: atom_key(m, i) for i, _, _, _ in cons}
+        partners = [site for _, site, jm, _ in cons if jm is None]
+        cap = max(2 * len(self.struct.atoms), 120)
+        add, trunc = ([], False)
+        if partners:
+            add, trunc = complete_from(self.struct, seeds=partners, model=m, tol=self._tol(), max_new=cap * len(partners))
+        if add:
+            self.s.extra_sites = list(self.s.extra_sites) + [s for s in add if s not in self.s.extra_sites]
+            self.rebuild()
+        m = self.model
+        idx = model_index_by_site(self.struct, m)
+        n_lines = 0
+        for i, site, jm, d in cons:
+            k = idx.get((site[0], tuple(np.round(site_frac(self.struct, site), 3))))
+            if k is None:
+                continue
+            a, b = keys_i[i], atom_key(m, k)
+            bk = (a, b) if a <= b else (b, a)
+            self.s.custom_bonds[bk] = dict(style='Dashed', width='Thin', contact=True, dist=True)
+            n_lines += 1
+        self._edits_changed(f'{n_lines} short contact(s); {len(add)} atom(s) added'
+                            + ('  (polymer: neighbouring chains cut)' if trunc else ''))
+
+    def clear_grown(self):
+        if self.struct is None:
+            return
+        self.s.extra_sites = []
+        self.s.custom_bonds = {k: v for k, v in self.s.custom_bonds.items() if not v.get('contact')}
+        self.selection = []
+        self.rebuild()
+        if self.gl is not None:
+            self.gl.dirty = True
+        self.update_status()
+        self.update_si()
+        self.request_redraw()
+        self.toast('Grown atoms and contacts removed')
+
+    # ---- molecule list (Mercury-style)
+    def show_molecules(self):
+        if self.model is None:
+            self.toast('Open a structure first')
+            return
+        w = getattr(self, '_mol_win', None)
+        if w is not None:
+            try:
+                if w.winfo_exists():
+                    w.lift()
+                    self._fill_molecules()
+                    return
+            except tk.TclError:
+                pass
+        w = self._dialog('Molecules', '580x560')
+        self._mol_win = w
+        ctk.CTkLabel(w, text='Molecules / fragments in the picture. Select some (Ctrl / Shift + click), then '
+                             'use the buttons. Double click a line to select it in the picture.',
+                     wraplength=430, justify='left', anchor='w').pack(fill='x', padx=10, pady=(10, 4))
+        fr = tk.Frame(w)
+        fr.pack(fill='both', expand=True, padx=10)
+        lb = tk.Listbox(fr, selectmode='extended', exportselection=False, font=('Consolas', 11))
+        sb = tk.Scrollbar(fr, orient='vertical', command=lb.yview)
+        lb.configure(yscrollcommand=sb.set)
+        lb.pack(side='left', fill='both', expand=True)
+        sb.pack(side='right', fill='y')
+        self._mol_lb = lb
+
+        def chosen():
+            return [k for c in lb.curselection() for k in self._mol_frags[c]]
+
+        def act(fn):
+            atoms = chosen()
+            if not atoms:
+                self.toast('Choose molecules in the list first')
+                return
+            fn(atoms)
+            self._fill_molecules()
+
+        def show(atoms):
+            m = self.model
+            keys = {atom_key(m, k) for k in atoms}
+            self.s.hidden_keys -= keys
+            excl = {m.labels[k] for k in atoms}
+            if self.s.excluded & excl:
+                self.toast('Some atoms are excluded by name (Structure → Restore all)', 'warn')
+            self._after_exclusion()
+
+        def only(atoms):
+            keep = set(atoms)
+            show(atoms)
+            others = [k for k in range(self.model.n) if k not in keep and self._visible_mask()[k]]
+            if others:
+                self.hide_atoms(others, 'other molecules')
+        lb.bind('<Double-Button-1>', lambda e: act(self._select_atoms))
+        row1 = ctk.CTkFrame(w, fg_color='transparent')
+        row1.pack(fill='x', padx=10, pady=(6, 2))
+        for text, fn in (('Select', self._select_atoms), ('Show only', only), ('Hide', lambda a: self.hide_atoms(a)),
+                         ('Show', show)):
+            ctk.CTkButton(row1, text=text, width=60, command=lambda f=fn: act(f)).pack(side='left', expand=True,
+                                                                                   fill='x', padx=2)
+        row2 = ctk.CTkFrame(w, fg_color='transparent')
+        row2.pack(fill='x', padx=10, pady=(2, 10))
+        ctk.CTkButton(row2, text='Short contacts', width=60,
+                      command=lambda: act(lambda a: (self._select_atoms(a), self.contacts_selected()))
+                      ).pack(side='left', expand=True, fill='x', padx=2)
+        ctk.CTkButton(row2, text='Show all', width=60, fg_color='gray45',
+                      command=lambda: (self.restore_excluded(), self._fill_molecules())
+                      ).pack(side='left', expand=True, fill='x', padx=2)
+        ctk.CTkButton(row2, text='Refresh', width=60, fg_color='gray45', command=self._fill_molecules
+                      ).pack(side='left', expand=True, fill='x', padx=2)
+        self._fill_molecules()
+
+    def _fill_molecules(self):
+        lb = getattr(self, '_mol_lb', None)
+        if lb is None or self.model is None:
+            return
+        try:
+            if not lb.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        from .si import _hill, fragments
+        m = self.model
+        s = self.s
+        is_h = m.is_h()
+        vis = np.array([m.labels[k] not in s.excluded and atom_key(m, k) not in s.hidden_keys
+                        and (not is_h[k] or s.show_h or atom_key(m, k) in s.shown_h) for k in range(m.n)], bool)
+        sv = {tuple(sorted(f)): name for name, _, f in identify_solvents(m)}
+        frs = sorted(fragments(m), key=lambda f: (-len(f), min(f)))
+        self._mol_frags = frs
+        lb.delete(0, 'end')
+        for n, f in enumerate(frs, 1):
+            counts = {}
+            for k in f:
+                e = m.elements[k]
+                if e != 'Cg':
+                    e = 'H' if e == 'D' else e
+                    counts[e] = counts.get(e, 0) + 1
+            nv = int(sum(vis[k] for k in f))
+            state = '✓' if nv == len(f) or (nv and all(vis[k] or m.is_h()[k] for k in f)) else \
+                ('◐' if nv else '✗')
+            gen = all(m.generated[k] for k in f)
+            name = sv.get(tuple(sorted(f)))
+            lb.insert('end', f'{state} {n:>3}. {_hill(counts):<26} {len(f):>4} atoms'
+                             + (f'  solvent: {name}' if name else '') + ('  (symm.)' if gen else ''))
+
     def label_key(self):
         """L: no atoms selected -> all labels off (or back on); atoms selected -> label only those."""
         if self.model is None:
             return
         s = self.s
+        move_tip = '\nTip: Ctrl + drag a label to move it around.'
         if self.selection:
-            keep = {display_name(self.model, i, s) for i in self.selection}
-            s.hidden_labels = {display_name(self.model, i, s) for i in range(self.model.n)} - keep
-            self.lab_on.set(True)
-            self.on_labels()
-            self.toast(f'Labels only on the {len(keep)} selected atom(s)')
+            sel = {display_name(self.model, i, s) for i in self.selection}
+            if not self.lab_on.get():
+                # labels were off: label just the selected atoms
+                s.hidden_labels = {display_name(self.model, i, s) for i in range(self.model.n)} - sel
+                self.lab_on.set(True)
+                self.on_labels()
+                self.toast(f'Labels shown on the {len(sel)} selected atom(s).' + move_tip, ms=4200)
+            elif sel & s.hidden_labels:
+                # add the selected atoms to the labelled ones
+                s.hidden_labels -= sel
+                self.on_labels()
+                self.toast(f'Labels added on the {len(sel)} selected atom(s).' + move_tip, ms=4200)
+            else:
+                # all selected already labelled: L removes their labels
+                s.hidden_labels |= sel
+                self.on_labels()
+                self.toast(f'Labels removed from the {len(sel)} selected atom(s)')
             return
         if self.lab_on.get():
             self.lab_on.set(False)
@@ -1855,7 +2471,7 @@ class OrtepApp(ctk.CTk):
             s.hidden_labels = set()
             self.lab_on.set(True)
             self.on_labels()
-            self.toast('All labels on')
+            self.toast('All labels on' + move_tip, ms=4200)
 
     def _toggle_labels(self):
         self.lab_on.set(not self.lab_on.get())
@@ -1892,7 +2508,8 @@ class OrtepApp(ctk.CTk):
 
     # ------------------------------------------------------------------ exclusion
     def _set_cursor(self):
-        cur = 'crosshair' if (self._exclude_mode or self._wire_mode or self._geo_mode) else ''
+        cur = 'crosshair' if (self._exclude_mode or self._wire_mode or self._geo_mode
+                              or getattr(self, '_hadd_mode', False)) else ''
         for w in (self.canvas.get_tk_widget(), self.gl):
             if w is not None:
                 try:
@@ -1901,6 +2518,8 @@ class OrtepApp(ctk.CTk):
                     pass
 
     def toggle_exclude(self):
+        if getattr(self, '_hadd_mode', False):
+            self.toggle_hadd_mode()
         if self._wire_mode:
             self.toggle_wire_mode()
         if self._geo_mode:
@@ -1981,6 +2600,7 @@ class OrtepApp(ctk.CTk):
         self.excl_lbl.configure(text=txt)
         self.request_redraw()
         self.update_status()
+        self._fill_molecules()
 
     def exclude_by_name(self):
         if self.struct is None:
@@ -2004,7 +2624,7 @@ class OrtepApp(ctk.CTk):
         dis = disordered_labels(self.struct)
         solv_tag = self._solvent_labels()[1]
         elem = {a.label: a.element for a in self.struct.atoms}
-        w = self._dialog(title, '400x580')
+        w = self._dialog(title, '430x700')
         ctk.CTkLabel(w, text=prompt, wraplength=330,
                      justify='left').pack(fill='x', padx=10, pady=(10, 4))
         fr = tk.Frame(w)
@@ -2036,6 +2656,41 @@ class OrtepApp(ctk.CTk):
         ctk.CTkButton(row, text='Clear', width=60, command=lambda: lb.selection_clear(0, 'end')
                       ).pack(side='left', padx=2)
 
+        # disorder: the user types the label suffix of each part (C21 / C21*, C55A / C55B …)
+        from .si import disorder_parts, guess_disorder_suffixes
+        dbox = ctk.CTkFrame(w, corner_radius=6)
+        dbox.pack(fill='x', padx=10, pady=(4, 2))
+        ctk.CTkLabel(dbox, text='Disorder labels', font=ctk.CTkFont(weight='bold'), anchor='w'
+                     ).grid(row=0, column=0, columnspan=4, sticky='w', padx=8, pady=(4, 0))
+        g = getattr(self, '_dis_suffix', None)
+        if not g or g[0] != self.path:
+            g = (self.path,) + tuple(guess_disorder_suffixes(self.struct))
+            self._dis_suffix = g
+        maj_v, min_v = tk.StringVar(value=g[1]), tk.StringVar(value=g[2])
+        ctk.CTkLabel(dbox, text='Major part ends with').grid(row=1, column=0, sticky='w', padx=8)
+        ctk.CTkEntry(dbox, textvariable=maj_v, width=50).grid(row=1, column=1, padx=2, pady=2)
+        ctk.CTkLabel(dbox, text='Minor part ends with').grid(row=2, column=0, sticky='w', padx=8)
+        ctk.CTkEntry(dbox, textvariable=min_v, width=50).grid(row=2, column=1, padx=2, pady=2)
+
+        def part_sel(which):
+            self._dis_suffix = (self.path, maj_v.get().strip(), min_v.get().strip())
+            maj, mnr = disorder_parts(self.struct, maj_v.get(), min_v.get())
+            labs = maj if which == 'major' else mnr
+            if not labs:
+                self.toast(f'No {which}-part atoms found with these suffixes', 'warn')
+                return
+            sel(lambda l: l in labs)
+            k = min(labels.index(l) for l in labs if l in labels)
+            lb.see(k)
+        ctk.CTkButton(dbox, text='+ major part', width=100, command=lambda: part_sel('major')
+                      ).grid(row=1, column=2, padx=4, pady=2)
+        ctk.CTkButton(dbox, text='+ minor part', width=100, command=lambda: part_sel('minor')
+                      ).grid(row=2, column=2, padx=4, pady=2)
+        ctk.CTkLabel(dbox, text='e.g. C21 / C21*: major empty, minor *    C55A / C55B: major A, minor B.\n'
+                                'Both empty: PART numbers are used (PART 1 = major).',
+                     text_color='gray50', justify='left', anchor='w', font=ctk.CTkFont(size=11)
+                     ).grid(row=3, column=0, columnspan=4, sticky='w', padx=8, pady=(0, 4))
+
         def apply():
             on_apply({labels[k] for k in lb.curselection()})
             w.destroy()
@@ -2047,7 +2702,77 @@ class OrtepApp(ctk.CTk):
         w.after(50, lambda: (w.lift(), w.focus_force()))
 
     # ------------------------------------------------------------------ wire
+    # ------------------------------------------------------------------ H add
+    def _attached_h(self, idx):
+        """H / D atoms bonded to the atoms idx."""
+        m = self.model
+        isel = set(int(i) for i in idx)
+        is_h = m.is_h()
+        out = []
+        for a, b in m.bonds:
+            a, b = int(a), int(b)
+            if a in isel and is_h[b] and b not in out:
+                out.append(b)
+            elif b in isel and is_h[a] and a not in out:
+                out.append(a)
+        return out
+
+    def add_h_of(self, idx, toggle=False):
+        """Show the H atoms on the atoms idx (hydrogens otherwise off). toggle: hide them if all shown."""
+        m = self.model
+        idx = [i for i in idx if not m.is_h()[i]]
+        if not idx:
+            return
+        hs = self._attached_h(idx)
+        names = ', '.join(self._name(i) for i in idx[:3]) + (' …' if len(idx) > 3 else '')
+        if not hs:
+            self.toast(f'No hydrogen atoms on {names}')
+            return
+        keys = {atom_key(m, h) for h in hs}
+        if toggle and keys <= self.s.shown_h:
+            self.s.shown_h -= keys
+            self.toast(f'H atoms on {names} hidden again')
+        else:
+            self.s.shown_h |= keys
+            self.toast(f'{len(keys)} H atom(s) shown on {names}: ' + ', '.join(self._name(h) for h in hs[:6]))
+        self.rebuild_view_after_h()
+
+    def rebuild_view_after_h(self):
+        if self.gl is not None:
+            self.gl.dirty = True
+        self.update_si()
+        self.request_redraw()
+
+    def toggle_hadd_mode(self):
+        if self.model is None and not self._hadd_mode:
+            self.toast('Open a structure first')
+            return
+        if self._exclude_mode:
+            self.toggle_exclude()
+        if self._wire_mode:
+            self.toggle_wire_mode()
+        if self._geo_mode:
+            self.toggle_geo_mode(self._geo_mode)
+        self._hadd_mode = not self._hadd_mode
+        self._set_cursor()
+        off = ctk.ThemeManager.theme['CTkButton']['fg_color']
+        self.hadd_btn.configure(text='H add ON – click atoms (Esc to stop)' if self._hadd_mode
+                                else 'H add  –  show the H atoms of clicked atoms',
+                                fg_color='#1f7a4d' if self._hadd_mode else off)
+        if not self._hadd_mode:
+            self.toast('H add off')
+            return
+        if self.h_var.get():                      # all H shown: switch them off so single ones can be added
+            self.h_var.set(False)
+            self.on_setting()
+        self.toast('H add: click an atom to show its hydrogen atoms (click again to hide them, Esc to stop)',
+                   ms=4500)
+        if self.selection:
+            self.add_h_of(list(self.selection))
+
     def toggle_wire_mode(self):
+        if getattr(self, '_hadd_mode', False):
+            self.toggle_hadd_mode()
         if self._exclude_mode:
             self.toggle_exclude()
         if self._geo_mode:
@@ -2252,12 +2977,28 @@ class OrtepApp(ctk.CTk):
         self.s.deleted_bonds = set()
         self._edits_changed('Centroids and bond edits removed')
 
-    def bond_dialog(self):
-        """Ctrl+B: draw (or restyle) bonds from the first selected atom to each other selected atom."""
+    def bonds_among_selection(self):
+        """The existing bonds whose two atoms are both selected."""
+        sel = set(self.selection)
+        return [(int(a), int(b)) for a, b in self.model.bonds if int(a) in sel and int(b) in sel]
+
+    def edit_selected_bonds(self):
+        pairs = self.bonds_among_selection()
+        if not pairs:
+            self.toast('No bonds between the selected atoms')
+            return
+        self.bond_dialog(pairs)
+
+    def bond_dialog(self, pairs=None):
+        """Ctrl+B: draw (or restyle) bonds from the first selected atom to each other selected atom.
+        pairs: explicit list of atom pairs (e.g. the bonds among the selected atoms)."""
         m = self.model
         if m is None:
             return
-        if len(self.selection) >= 2:
+        explicit = bool(pairs)
+        if explicit:
+            pairs = list(pairs)
+        elif len(self.selection) >= 2:
             first = self.selection[0]
             pairs = [(first, j) for j in self.selection[1:]]
         elif self.sel_bond is not None:
@@ -2267,10 +3008,10 @@ class OrtepApp(ctk.CTk):
             return
         names = ', '.join(f'{self._name(i)}–{self._name(j)}' for i, j in pairs[:6]) + (' …' if len(pairs) > 6 else '')
         cur = self.s.custom_bonds.get(bond_key(m, *pairs[0]), {})
-        w = self._dialog('Bond style', '420x470')
+        w = self._dialog('Bond style', '420x510')
         ctk.CTkLabel(w, text=f'{len(pairs)} bond(s): {names}', wraplength=380, justify='left', anchor='w',
                      font=ctk.CTkFont(weight='bold')).pack(fill='x', padx=12, pady=(12, 6))
-        style = tk.StringVar(value=cur.get('style', 'Dashed' if len(pairs) > 1 else 'Solid'))
+        style = tk.StringVar(value=cur.get('style', 'Dashed' if len(pairs) > 1 and not explicit else 'Solid'))
         width = tk.StringVar(value=cur.get('width', 'Normal'))
         prev = ctk.CTkLabel(w, text='')
         ctk.CTkLabel(w, text='Style', anchor='w').pack(fill='x', padx=12)
@@ -2282,6 +3023,9 @@ class OrtepApp(ctk.CTk):
         ctk.CTkSegmentedButton(w, values=list(BOND_WIDTHS), variable=width, command=redraw_prev).pack(fill='x', padx=12, pady=4)
         prev.pack(pady=8)
         redraw_prev()
+        show_d = tk.BooleanVar(value=bool(cur.get('dist', False)))
+        ctk.CTkCheckBox(w, text='Write the distance on the bond (e.g. Cl···Cg contacts)', variable=show_d
+                        ).pack(anchor='w', padx=12, pady=(0, 4))
         ctk.CTkLabel(w, text='Cp / η5 rings: select the ring carbons and press C for a centroid, then '
                              'bond metal–Cg (solid or dashed).\nCoordinated arenes / η-ligands: select the '
                              'metal first, then the ring carbons: one bond from the metal to each '
@@ -2290,6 +3034,9 @@ class OrtepApp(ctk.CTk):
 
         def apply():
             st = dict(style=style.get(), width=width.get())
+            if show_d.get():
+                st['dist'] = True
+                st['contact'] = style.get() != 'Solid'      # dashed / dotted lines do not join molecules
             old = {}
             for i, j in pairs:
                 k = bond_key(m, i, j)
@@ -2380,6 +3127,8 @@ class OrtepApp(ctk.CTk):
         self._after_wire()
         self._reset_history()                         # undo does not reach into the previous file
         self.toast(f'Opened {os.path.basename(path)}', 'ok')
+        if not self.s.labels_on:
+            self.toast('Labels: click an atom and press  L  (double click = whole molecule)', ms=5000)
 
     def _reset_structure_state(self):
         """Forget everything that belongs to one structure: exclusions, wire, centroids, bond edits,
@@ -2388,6 +3137,10 @@ class OrtepApp(ctk.CTk):
         self.s.label_offsets = {}
         self.s.excluded = set()
         self.s.hidden_keys = set()
+        self.s.shown_h = set()
+        self.s.extra_sites = []
+        if getattr(self, '_hadd_mode', False):
+            self.toggle_hadd_mode()
         self._exclude_hist = []
         self.s.wire = set()
         self.s.centroids = []
@@ -2396,6 +3149,8 @@ class OrtepApp(ctk.CTk):
         self.styles.clear_atom_overrides()
         self.geo_metal = None
         self.geo_ligands = []
+        self.vbur_lig = None
+        self._vb_cache = None
         if self._geo_mode:
             self._geo_mode = None
             self._set_cursor()
@@ -2433,7 +3188,9 @@ class OrtepApp(ctk.CTk):
             tol = 0.45
             self.tol_var.set('0.45')
         keep = [atom_key(self.model, i) for i in self.selection] if (self.model is not None and not reset) else []
-        self.model = build_model(self.struct, complete=self.grow_var.get(), tol=tol, pack=self.pack_var.get())
+        s = self.s
+        self.model = build_model(self.struct, complete=self.grow_var.get(), tol=tol, pack=self.pack_var.get(),
+                                 pack_range=s.pack_range, pack_mode=s.pack_mode, extra_sites=s.extra_sites)
         for note in apply_edits(self.model, self.s):
             self.model.notes.append(note)
         idx = {atom_key(self.model, i): i for i in range(self.model.n)}
@@ -2444,6 +3201,7 @@ class OrtepApp(ctk.CTk):
         self._refresh_targets()
         self.update_info()
         self.on_setting()
+        self._fill_molecules()
 
     # ================================================================== view
     def reset_view(self, redraw=True):
@@ -2508,7 +3266,16 @@ class OrtepApp(ctk.CTk):
                 self._gl_pending = True
                 self.after_idle(self._gl_refresh)
             return
-        if self.s.atom_style == 'Line drawing (vector)' or self.s.drag_quality == 'Full quality':
+        if self.s.atom_style in VECTOR_STYLES and fast:
+            # light preview (outlines + bonds) while the mouse moves, the full drawing when it stops
+            if self._pending is None:
+                self._pending = 'fast'
+                self.after_idle(self._render_pending)
+            if self._final_job is not None:
+                self.after_cancel(self._final_job)
+            self._final_job = self.after(180, self._render_final)
+            return
+        if self.s.atom_style in VECTOR_STYLES or self.s.drag_quality == 'Full quality':
             if self._pending is None:
                 self._pending = 'final'
                 self.after_idle(self._render_pending)
@@ -2537,9 +3304,9 @@ class OrtepApp(ctk.CTk):
     def _render(self, fast=False):
         if self.model is None:
             return
-        if fast and self._final_ver == self._ver:
+        if fast and self._final_ver == self._ver and self.s.atom_style not in VECTOR_STYLES:
             return          # a full-quality frame for this exact state is already on its way
-        if not fast and self.s.atom_style != 'Line drawing (vector)':
+        if not fast and self.s.atom_style not in VECTOR_STYLES:
             self._render_background()
             return
         W, H = self._canvas_px()
@@ -2559,7 +3326,7 @@ class OrtepApp(ctk.CTk):
         if self._gl_active():
             self.request_redraw(fast=True)
             return
-        if self.s.atom_style == 'Line drawing (vector)':
+        if self.s.atom_style in VECTOR_STYLES:
             self.request_redraw()
             return
         if len(self.view.visible) != self.model.n:
@@ -2632,8 +3399,13 @@ class OrtepApp(ctk.CTk):
             self._box = dict(x0=ev.xdata, y0=ev.ydata, x1=ev.xdata, y1=ev.ydata, px0=ev.x, py0=ev.y)
             self._drag = None
             return
+        now = time.monotonic()
+        lc = getattr(self, '_last_click', None)
+        dbl = (ev.button == 1 and ev.key is None and lc is not None and now - lc[0] < 0.4
+               and ev.x is not None and abs(ev.x - lc[1]) + abs(ev.y - lc[2]) <= 6)
+        self._last_click = None if dbl else ((now, ev.x, ev.y) if ev.button == 1 and ev.x is not None else None)
         self._drag = dict(x=ev.x, y=ev.y, x0=ev.x, y0=ev.y, button=ev.button, shift=False, moved=False,
-                          alt=(ev.key == 'alt'))
+                          alt=(ev.key == 'alt'), dbl=dbl)
 
     # ---- shift-drag box selection
     def _show_box(self):
@@ -2683,6 +3455,9 @@ class OrtepApp(ctk.CTk):
         if self._exclude_mode:
             self.exclude_labels(sorted({m.labels[i] for i in idx}, key=_natkey))
             return
+        if self._hadd_mode:
+            self.add_h_of(idx, toggle=small)
+            return
         if self._wire_mode:
             labs = {m.labels[i] for i in idx if not is_centroid(m, i)}
             self.set_wire(self.s.wire | labs, f'{len(labs)} atom(s) drawn as wire')
@@ -2725,6 +3500,23 @@ class OrtepApp(ctk.CTk):
             pair = self._pick_bond(ev.xdata, ev.ydata)
             i = pair[0] if pair else None
         menu = tk.Menu(self, tearoff=0)
+        if self.selection:
+            ns = len(self.selection)
+            menu.add_command(label=f'Selection: {ns} atom(s)', state='disabled')
+            if ns >= 2:
+                nb = len(self.bonds_among_selection())
+                menu.add_command(label=f'Edit the bonds among the selected atoms ({nb})…',
+                                 command=self.edit_selected_bonds, state='normal' if nb else 'disabled')
+            menu.add_command(label='Select whole molecules of the selected atoms', command=self.select_fragments)
+            menu.add_command(label='Grow: atoms bonded across symmetry (+1 step)', command=self.grow_selected)
+            menu.add_command(label='Complete the molecules', command=self.complete_selected)
+            menu.add_command(label='Short contacts of the selected atoms', command=self.contacts_selected)
+            menu.add_command(label='Show only the selected molecules', command=self.show_only_selected_molecules)
+            menu.add_command(label='Show only the selected atoms', command=self.show_only_selected)
+            menu.add_command(label='Hide the selected atoms', command=lambda: self.hide_atoms(list(self.selection),
+                                                                                             'selection'))
+            menu.add_command(label='Invert the selection', command=self.invert_selection)
+            menu.add_separator()
         if i is not None:
             fr = self._fragment_of(i)
             vis = view.visible if len(view.visible) == m.n else np.ones(m.n, bool)
@@ -2743,6 +3535,9 @@ class OrtepApp(ctk.CTk):
             menu.add_command(label=f'Hide this {"solvent molecule" if solvent else "molecule"} ({len(fr)} atoms)',
                              command=lambda: self.hide_atoms(fr, 'solvent molecule' if solvent else 'molecule'))
             menu.add_command(label=f'Hide atom {self._name(i)}', command=lambda: self.hide_atoms([i], 'atom'))
+            if not self.s.show_h and self._attached_h([i]):
+                menu.add_command(label=f'Show / hide the H atoms on {self._name(i)}',
+                                 command=lambda: self.add_h_of([i], toggle=True))
             menu.add_command(label='Select this molecule', command=lambda: self._select_atoms(fr_vis))
             menu.add_separator()
             menu.add_command(label=f'Rotate around {self._name(i)}', command=lambda: self.set_rotation_center(i))
@@ -2810,6 +3605,50 @@ class OrtepApp(ctk.CTk):
         self.update_si()
         self.toast(f'{what.capitalize()} hidden ({len(keys)} atoms)  –  Ctrl+Z to undo', 'warn')
 
+    def _visible_mask(self):
+        view = self._active_view()
+        m = self.model
+        return view.visible if len(view.visible) == m.n else np.ones(m.n, bool)
+
+    def _fragments_of_selection(self):
+        from .si import fragments
+        sel = set(self.selection)
+        vis = self._visible_mask()
+        out = []
+        for fr in fragments(self.model):
+            if sel & set(fr):
+                out += [k for k in fr if vis[k]]
+        return out
+
+    def select_fragments(self):
+        if self.model is None or not self.selection:
+            return
+        self._select_atoms(self._fragments_of_selection())
+
+    def show_only_selected_molecules(self):
+        if self.model is None or not self.selection:
+            return
+        keep = set(self._fragments_of_selection())
+        others = [k for k in range(self.model.n) if k not in keep and self._visible_mask()[k]]
+        self.hide_atoms(others, 'everything else')
+
+    def show_only_selected(self):
+        if self.model is None or not self.selection:
+            return
+        keep = set(self.selection)
+        others = [k for k in range(self.model.n) if k not in keep and self._visible_mask()[k]]
+        self.hide_atoms(others, 'everything else')
+
+    def invert_selection(self):
+        if self.model is None:
+            return
+        vis = self._visible_mask()
+        sel = set(self.selection)
+        self.selection = [k for k in range(self.model.n) if vis[k] and k not in sel]
+        self.update_status()
+        self.redraw_overlay()
+        self.toast(f'{len(self.selection)} atoms selected')
+
     def _select_atoms(self, idx):
         self.selection = [k for k in self.selection if k not in idx] + list(idx)
         self.update_status()
@@ -2870,9 +3709,24 @@ class OrtepApp(ctk.CTk):
         if d['button'] != 1 or ev.xdata is None:
             return
         i = self._active_view().pick(ev.xdata, ev.ydata)
+        if d.get('dbl') and i is not None and not (self._geo_mode or self._exclude_mode or self._wire_mode
+                                                    or self._hadd_mode):
+            # double click: the whole molecule / fragment
+            vis = self._visible_mask()
+            fr = [k for k in self._fragment_of(i) if vis[k]]
+            self._set_sel_bond(None)
+            self.selection = [k for k in self.selection if k not in fr] + fr
+            self.update_status()
+            self.redraw_overlay()
+            self.toast(f'Fragment selected: {len(fr)} atoms ({len(self.selection)} selected)')
+            return
         if self._geo_mode:
             if i is not None:
                 self._geo_click(i)
+            return
+        if self._hadd_mode:
+            if i is not None:
+                self.add_h_of([i], toggle=True)
             return
         if not (self._exclude_mode or self._wire_mode):
             inside = i is not None and np.hypot(*(self._active_view().anchor_xy[i] - (ev.xdata, ev.ydata))) <= \
@@ -2926,6 +3780,9 @@ class OrtepApp(ctk.CTk):
             if self._wire_mode:
                 self.toggle_wire_mode()
                 return
+            if self._hadd_mode:
+                self.toggle_hadd_mode()
+                return
             if self._geo_mode:
                 self.toggle_geo_mode(self._geo_mode)
                 return
@@ -2943,6 +3800,13 @@ class OrtepApp(ctk.CTk):
     # ================================================================== text
     def _name(self, i):
         return display_name(self.model, i, self.s)
+
+    def _shown_h_names(self):
+        m = self.model
+        if m is None or self.s.show_h or not self.s.shown_h:
+            return []
+        is_h = m.is_h()
+        return [self._name(k) for k in range(m.n) if is_h[k] and atom_key(m, k) in self.s.shown_h]
 
     def update_status(self):
         m = self.model
@@ -3034,12 +3898,14 @@ class OrtepApp(ctk.CTk):
         return args
 
     # ---- background jobs with progress bar
-    def _run_job(self, title, func):
-        """func(report, cancel) runs in a worker thread; progress bar + Cancel button meanwhile."""
+    def _run_job(self, title, func, on_done=None, what='Export'):
+        """func(report, cancel) runs in a worker thread; progress bar + Cancel button meanwhile.
+        on_done(result) replaces the 'Saved …' message."""
         if self._busy:
-            messagebox.showinfo('Busy', 'An export is already running.')
+            messagebox.showinfo('Busy', 'An export or download is already running.')
             return
         self._busy = True
+        self._job_done, self._job_what = on_done, what
         self.progress.set(0)
         self.progress.pack(side='left', padx=(0, 10))
         self.cancel_btn.pack(side='left', padx=(0, 10))
@@ -3093,17 +3959,23 @@ class OrtepApp(ctk.CTk):
                 if msg:
                     self.status.configure(text=msg)
             elif kind == 'done':
-                self.status.configure(text=f'Saved {val}')
-                self.toast(f'Saved {os.path.basename(str(val))}', 'ok')
+                cb = getattr(self, '_job_done', None)
+                if cb is not None:
+                    self.after(10, lambda v=val, c=cb: c(v))
+                else:
+                    self.status.configure(text=f'Saved {val}')
+                    self.toast(f'Saved {os.path.basename(str(val))}', 'ok')
                 done = True
             elif kind == 'cancelled':
-                self.status.configure(text='Export cancelled')
-                self.toast('Export cancelled', 'warn')
+                what = getattr(self, '_job_what', 'Export')
+                self.status.configure(text=f'{what} cancelled')
+                self.toast(f'{what} cancelled', 'warn')
                 done = True
             else:
-                self.status.configure(text='Export failed')
-                self.toast('Export failed', 'error')
-                messagebox.showerror('Export failed', val)
+                what = getattr(self, '_job_what', 'Export')
+                self.status.configure(text=f'{what} failed')
+                self.toast(f'{what} failed', 'error')
+                messagebox.showerror(f'{what} failed', val)
                 done = True
         if done:
             self._busy = False
@@ -3128,10 +4000,14 @@ class OrtepApp(ctk.CTk):
             return
         path = filedialog.asksaveasfilename(
             title='Save image', initialfile=f'{self._base()}_ortep.png', defaultextension='.png',
-            filetypes=[('PNG', '*.png'), ('TIFF', '*.tif'), ('JPEG', '*.jpg'), ('SVG (labels as vector)', '*.svg'),
-                       ('PDF (labels as vector)', '*.pdf')])
+            filetypes=[('PNG', '*.png'), ('TIFF', '*.tif'), ('JPEG', '*.jpg'), ('SVG (vector)', '*.svg'),
+                       ('PDF (vector)', '*.pdf'), ('EPS (vector, color PostScript)', '*.eps'),
+                       ('PostScript', '*.ps')])
         if not path:
             return
+        if path.lower().endswith(('.svg', '.pdf', '.eps', '.ps')) and self.s.atom_style not in VECTOR_STYLES:
+            self.toast('Labels and lines are vector, but the shaded molecule is embedded as an image.\n'
+                       'For a fully vector file use the "Line drawing" or "ORTEP-3 classic" style.', 'warn', ms=7000)
         scale = self._export_scale(w, h)
         args = self._export_args_for(h / dpi, scale)
         opts = dict(width_px=w, height_px=h, dpi=dpi, transparent=self.trans_var.get(),

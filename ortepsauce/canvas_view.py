@@ -1,6 +1,8 @@
 """Draws a structure into a matplotlib Axes: shaded raster image or vector line drawing,
 plus the overlay (labels, Q-peak labels, cell axis letters, selection rings).
 Shared by the GUI, image export and GIF export so all three look identical."""
+import logging
+
 import numpy as np
 from PIL import Image
 from matplotlib import patheffects
@@ -11,7 +13,9 @@ from matplotlib.patches import Circle
 from .raster import render_scene
 from .renderer import OrtepRenderer
 from .scene import build_scene
-from .styles import NONMETALS, color_rgb, hex_to_rgb
+from .styles import NONMETALS, VECTOR_STYLES, color_rgb, hex_to_rgb
+
+logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)   # missing fonts fall back quietly
 
 
 def label_visible(settings, element):
@@ -157,11 +161,12 @@ class SceneView:
             ax.set_ylim(y0, y1)
             return
 
-        if s.atom_style == 'Line drawing (vector)':
+        if s.atom_style in VECTOR_STYLES:
             if self.image is not None:
                 self.image.set_visible(False)
             ax.patch.set_visible(not transparent)
             rend = OrtepRenderer(s, styles)
+            rend.lite = bool(fast)                  # while dragging: no octants / principal arcs
             n_before = len(ax.collections)
             xy, rr, vis = rend.draw(ax, model, R, center, cell=cell)
             self.artists += list(ax.collections[n_before:])
@@ -195,6 +200,11 @@ class SceneView:
 
         ax.set_xlim(x0, x1)
         ax.set_ylim(y0, y1)
+        if fast:                                    # while dragging: no labels (they return on release)
+            import copy as _copy
+            s = _copy.copy(s)
+            s.labels_on = False
+            s.contact_labels = False
         self._overlay(model, s, selection, q_xy, cell_P, halo=not fast)
 
     def show_raster(self, model, scene, rgba, oid, extent, s, selection=(), halo=True, styles=None):
@@ -290,6 +300,20 @@ class SceneView:
             for idx, name in ((0, 'O'), (4, 'a'), (2, 'b'), (1, 'c')):
                 self.artists.append(ax.text(cell_P[idx, 0], cell_P[idx, 1], ' ' + name, fontsize=s.label_size,
                                             zorder=21, color=cols[idx], family=s.label_font))
+        # distances written on contact lines (Mercury-style short contacts)
+        if getattr(s, 'contact_labels', True):
+            for (i, j), st in (getattr(model, 'bond_style', None) or {}).items():
+                if not st.get('dist') or max(i, j) >= len(self.anchor_xy):
+                    continue
+                if max(i, j) < len(self.visible) and not (self.visible[i] and self.visible[j]):
+                    continue
+                d = float(np.linalg.norm(model.cart[i] - model.cart[j]))
+                p = 0.5 * (self.anchor_xy[i] + self.anchor_xy[j])
+                fx = [patheffects.withStroke(linewidth=s.halo_width, foreground=s.background)] \
+                    if s.label_halo else None
+                self.artists.append(ax.text(p[0], p[1], f'{d:.2f} Å', fontsize=s.label_size * 0.8, zorder=21,
+                                            color=color_rgb(s.label_color), family=s.label_font,
+                                            ha='center', va='bottom', path_effects=fx))
         for i, col in getattr(self, 'highlight', None) or []:
             if i < len(self.anchor_r) and (i >= len(self.visible) or self.visible[i]):
                 ring = Circle(self.anchor_xy[i], self.anchor_r[i] + 0.16, fill=False, edgecolor=col,

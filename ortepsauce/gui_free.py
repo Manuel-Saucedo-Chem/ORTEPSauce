@@ -23,11 +23,14 @@ def load_structure(path, block=0):
 def render_file(path, out, dpi=600, size=None, prob=50.0, labels=True, show_h=True,
                 style='ORTEP ellipsoids', preset='POV-Ray (ORTEP-3)', complete=True, block=0,
                 transparent=True, frames=200, shadows=False, engine='Built-in', povray_exe=None,
-                antialias=True, progress=None, pack=False):
+                antialias=True, progress=None, pack=False, pack_range=None, pack_mode='Whole molecules'):
     """size: (width_px, height_px); default 6400 x 4800 for images, 1600 x 1200 for GIFs."""
     st = load_structure(path, block)
-    model = build_model(st, complete=complete, pack=pack)
+    model = build_model(st, complete=complete, pack=pack, pack_range=pack_range, pack_mode=pack_mode)
     s = RenderSettings(probability=prob, labels_on=labels, show_h=show_h, atom_style=style)
+    if style == 'ORTEP-3 classic':
+        from .settings import classic_label_look
+        classic_label_look(s)
     styles = StyleTable(preset)
     low = out.lower()
     if size is None:

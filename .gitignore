@@ -4,3 +4,10 @@ dist/
 build-env/
 __pycache__/
 *.spec
+
+ORTEPSauce-1.0-win64/
+dist/
+build/
+*.spec
+*.zip
+__pycache__/

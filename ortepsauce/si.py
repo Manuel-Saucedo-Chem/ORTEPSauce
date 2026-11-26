@@ -31,6 +31,11 @@ def _cif_match(entries, value, tol):
     return best
 
 
+def _is_metal(el):
+    from .styles import NONMETALS
+    return el not in NONMETALS and el not in ('Cg', 'Q')
+
+
 def selected_geometry(model, struct, selection, suffix='*', merge_equivalent=True):
     """Bonds and angles among the selected atoms (in selection order).
     Returns (bonds, angles, used_cif) with items (names..., value_text, generated_flags)."""
@@ -68,7 +73,11 @@ def selected_geometry(model, struct, selection, suffix='*', merge_equivalent=Tru
             if merge_equivalent and key in seen:
                 continue
             seen.add(key)
-            bonds.append((name(a), name(b), txt))
+            # central metal first, then the ligand atom (Fe1–O1, not O1–Fe1)
+            first, second = a, b
+            if _is_metal(model.elements[b]) and not _is_metal(model.elements[a]):
+                first, second = b, a
+            bonds.append((name(first), name(second), txt))
 
     angles, seen = [], set()
     for c in sel:
@@ -114,9 +123,79 @@ def disordered_labels(struct):
     return out
 
 
+def guess_disorder_suffixes(struct):
+    """Guess the label suffixes of the two disorder parts: ('', '*') for C21 / C21*,
+    ('A', 'B') for C55A / C55B (the part with the higher mean occupancy is the major one)."""
+    labs = [a.label for a in struct.atoms]
+    lset = set(labs)
+    heavy = [a for a in struct.atoms if a.element not in ('H', 'D')]
+    for tail in ('*', "'", '"', '_2', '_b'):
+        if sum(1 for a in heavy if a.label.endswith(tail) and a.label[:-len(tail)] in lset) >= 1:
+            return '', tail
+    occ = {}
+    for a in heavy:
+        m = _DIS.match(a.label)
+        if m and m.group(2).isalpha():
+            occ.setdefault(m.group(2).upper(), []).append(a.occupancy if a.occupancy is not None else 1.0)
+    pairs = [(x, y) for x, y in (('A', 'B'), ('B', 'C'), ('A', 'C')) if x in occ and y in occ]
+    if pairs:
+        x, y = pairs[0]
+        if sum(occ[y]) / len(occ[y]) > sum(occ[x]) / len(occ[x]) + 1e-3:
+            x, y = y, x
+        return x, y
+    return '', ''
+
+
+def disorder_parts(struct, major, minor):
+    """Labels of the major and minor disorder parts, given the suffixes the user types
+    (major may be empty: C21 / C21*). H atoms follow the PART number of their part."""
+    major, minor = (major or '').strip(), (minor or '').strip()
+    atoms = {a.label: a for a in struct.atoms}
+    flagged = disordered_labels(struct)
+    maj, mnr = set(), set()
+    if not minor and not major:
+        # no naming scheme: fall back on the PART numbers (PART 1 = major, PART 2, 3 … = minor)
+        pos = sorted({a.part for a in struct.atoms if a.part and a.part > 0})
+        if len(pos) >= 2:
+            maj = {a.label for a in struct.atoms if a.part == pos[0]}
+            mnr = {a.label for a in struct.atoms if a.part in pos[1:]}
+        return maj, mnr
+
+    def base_of(lab, suf):
+        if suf:
+            return lab[:-len(suf)] if lab.endswith(suf) and len(lab) > len(suf) else None
+        return lab
+    for lab, a in atoms.items():
+        if a.element in ('H', 'D'):
+            continue
+        b = base_of(lab, minor) if minor else None
+        if b is not None and (b + major in atoms or lab in flagged):
+            mnr.add(lab)
+            if b + major in atoms:
+                maj.add(b + major)
+            continue
+        b = base_of(lab, major) if major else None
+        if b is not None and (minor and b + minor in atoms or lab in flagged and major):
+            maj.add(lab)
+    # hydrogen atoms: by PART number, or by the same suffix rule
+    def parts(labs):
+        return {atoms[l].part for l in labs if atoms[l].part}
+    pmaj, pmnr = parts(maj), parts(mnr)
+    for lab, a in atoms.items():
+        if a.element not in ('H', 'D'):
+            continue
+        if a.part and a.part in pmnr and a.part not in pmaj:
+            mnr.add(lab)
+        elif a.part and a.part in pmaj and a.part not in pmnr:
+            maj.add(lab)
+        elif minor and minor not in 'ABCD' and lab.endswith(minor):
+            mnr.add(lab)
+    return maj, mnr
+
+
 def caption(figure, compound, probability, show_h, model, struct, selection, suffix='*',
             merge_equivalent=True, generated_visible=False, excluded=(), mention_solvent=True,
-            hidden_keys=()):
+            hidden_keys=(), shown_h=()):
     bonds, angles, used_cif = selected_geometry(model, struct, selection, suffix, merge_equivalent)
     sel_gen = any(model.generated[i] for i in selection)
     parts = [f'Figure {figure}. Solid-state molecular structure of {compound} at '
@@ -132,7 +211,7 @@ def caption(figure, compound, probability, show_h, model, struct, selection, suf
     shown_solv = [x for x in solv if x not in hidden_solv]
     omitted = []
     if not show_h:
-        omitted.append('hydrogen atoms')
+        omitted.append('hydrogen atoms' + (f' (except {", ".join(shown_h)})' if shown_h else ''))
     if dis_excluded:
         omitted.append('disordered parts')
     if hidden_solv:
@@ -205,8 +284,12 @@ def fragments(model):
             parent[i] = parent[parent[i]]
             i = parent[i]
         return i
+    styles = getattr(model, 'bond_style', {}) or {}
     for a, b in model.bonds:
-        ra, rb = find(int(a)), find(int(b))
+        a, b = int(a), int(b)
+        if styles.get((min(a, b), max(a, b)), {}).get('contact'):
+            continue                                  # a drawn contact does not join two molecules
+        ra, rb = find(a), find(b)
         if ra != rb:
             parent[ra] = rb
     groups = {}

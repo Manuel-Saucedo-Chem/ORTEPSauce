@@ -7,6 +7,7 @@ import os
 import shutil
 import tempfile
 
+import matplotlib
 import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
@@ -15,7 +16,7 @@ from .canvas_view import SceneView
 from .pov_export import run_povray, write_ini, write_pov
 from .raster import render_scene
 from .scene import build_scene
-from .styles import hex_to_rgb
+from .styles import VECTOR_STYLES, hex_to_rgb
 from .view import rot_x, rot_y, rot_z
 
 class ExportCancelled(Exception):
@@ -82,7 +83,7 @@ def export_image(path, model, struct, R, center, scale, pan, settings, styles,
     W, H = int(width_px), int(height_px)
     fig, ax = _figure(W / dpi, H / dpi, dpi, settings.background, transparent)
     view = SceneView(ax)
-    if settings.atom_style == 'Line drawing (vector)':
+    if settings.atom_style in VECTOR_STYLES:
         progress(0.3, 'Drawing …')
         view.draw(model, struct, R, center, scale, pan, settings, styles, W, H, transparent=transparent)
     else:
@@ -101,8 +102,13 @@ def export_image(path, model, struct, R, center, scale, pan, settings, styles,
         kw['pil_kwargs'] = {'quality': 95}
     elif low.endswith(('.tif', '.tiff')):
         kw['pil_kwargs'] = {'compression': 'tiff_lzw'}
-    fig.savefig(path, dpi=dpi, transparent=transparent,
-                facecolor='none' if transparent else settings.background, **kw)
+    # keep text as editable text in SVG / PDF / EPS (Illustrator, Inkscape …)
+    rc = {'svg.fonttype': 'none', 'pdf.fonttype': 42, 'ps.fonttype': 42}
+    if low.endswith(('.eps', '.ps')):
+        kw['format'] = 'eps' if low.endswith('.eps') else 'ps'
+    with matplotlib.rc_context(rc):
+        fig.savefig(path, dpi=dpi, transparent=transparent,
+                    facecolor='none' if transparent else settings.background, **kw)
     progress(1.0, f'Saved {path}')
     return path
 
@@ -171,7 +177,7 @@ def export_gif(path, model, struct, R, center, scale, pan, settings, styles, wid
     a = W / H
     extent = (pan[0] - scale * a, pan[0] + scale * a, pan[1] - scale, pan[1] + scale)
     rots = [spin_rotation(axis, math.radians(degrees) * f / frames, direction) @ R for f in range(frames)]
-    vector = settings.atom_style == 'Line drawing (vector)'
+    vector = settings.atom_style in VECTOR_STYLES
     results = [None] * frames
     if not vector:
         jobs = [(model, struct, Rf, center, scale, pan, settings, W, H, styles, shadows, transparent)

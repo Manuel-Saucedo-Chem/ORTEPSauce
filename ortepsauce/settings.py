@@ -39,7 +39,7 @@ class RenderSettings:
     drag_quality: str = 'Smooth (1/2 res)'  # preview while dragging, or 'Full quality'
     background: str = '#ffffff'
     # --- labels
-    labels_on: bool = True
+    labels_on: bool = False                 # off on load: select atoms + L to label them
     label_which: str = 'Non-H'              # 'All', 'Non-H', 'Heavy atoms', 'Metals only'
     label_size: float = 16.0
     label_font: str = 'Arial'
@@ -55,6 +55,13 @@ class RenderSettings:
     label_offsets: dict = field(default_factory=dict)  # display name -> (dx, dy) screen Angstrom (Ctrl+drag)
     excluded: set = field(default_factory=set)         # asymmetric-unit labels not drawn
     hidden_keys: set = field(default_factory=set)      # single atoms hidden by right-click ('label|symop')
+    shown_h: set = field(default_factory=set)          # H atoms shown although hydrogens are off ('H add')
+    # --- packing / growing (Mercury-style)
+    pack_range: tuple = ((0.0, 1.0), (0.0, 1.0), (0.0, 1.0))   # fractional range packed along a, b, c
+    pack_mode: str = 'Whole molecules'                  # or 'Atoms in range' (polymers, networks)
+    extra_sites: list = field(default_factory=list)    # grown / contact atoms: (asym, op, (na, nb, nc))
+    contact_tol: float = 0.0                            # contact if d < sum of vdW radii + this
+    contact_labels: bool = True                         # distance label on contact lines
     # --- wire (thin-line) parts of the molecule
     wire: set = field(default_factory=set)             # asymmetric-unit labels drawn as thin wires
     wire_radius: float = 0.025                         # Angstrom
@@ -66,3 +73,14 @@ class RenderSettings:
     centroid_radius: float = 0.09                      # Angstrom
     # --- animation
     grain: bool = True                                 # crand grain of Speckled etc. (off for GIF frames)
+
+
+def classic_label_look(s):
+    """Old ORTEP-3 labels: plain black Arial, no bold / italic, no halo (text stays editable in SVG/PDF/EPS)."""
+    s.label_bold = False
+    s.label_italic = False
+    s.label_elem_color = False
+    s.label_halo = False
+    s.label_font = 'Arial'
+    s.label_color = '#000000'
+    return s

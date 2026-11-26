@@ -153,7 +153,8 @@ TEXTURE_NAMES = list(TEXTURES)
 
 ELLIPSE_STYLES = ['PlainEllipse', 'BoundaryEllipse', 'CutoutEllipse']
 ATOM_STYLES = ['ORTEP ellipsoids', 'Van der Waals', 'RMSD surface', 'Ball and Stick', 'Rods',
-               'MSD surface', 'Line drawing (vector)']
+               'MSD surface', 'Line drawing (vector)', 'ORTEP-3 classic']
+VECTOR_STYLES = ('Line drawing (vector)', 'ORTEP-3 classic')   # drawn as true vector paths
 
 # --------------------------------------------------------------------------- defaults
 # From the user's ORTEP-3 / POV-Ray texture block.
